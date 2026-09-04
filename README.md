@@ -166,22 +166,71 @@ The Python client module (`app/blockchain/blockchain_client.py`) interfaces the 
 
 ---
 
-## Planned Technology Stack
+## Technology Stack
 
 - **Application & CLI:** Python 3
+- **Interactive Web UI:** Streamlit (`frontend/app.py`)
 - **Face Processing:** OpenCV, YuNet (face detection), SFace (facial recognition / feature extraction)
-- **Web / Reverse-Image Search:** Genuine Search Engine API (e.g., SerpApi / Google Lens Search API)
+- **Web / Reverse-Image Search:** Genuine Search Engine API (SerpApi / Google Lens API)
 - **Smart Contract Development:** Solidity, Hardhat
-- **Blockchain Network:** Local Ethereum node (Hardhat Network / anvil / ganache)
+- **Blockchain Network:** Local Ethereum node (Hardhat Network `http://127.0.0.1:8545`)
 - **Blockchain Client Integration:** Python `web3.py`
 
 ---
 
+## Frontend / UI (Streamlit Web Dashboard)
+
+A dedicated, browser-based web application is provided in `frontend/app.py` built with Streamlit. It connects directly to the backend pipeline to provide an interactive, visual interface for portrait upload, detection inspection, reverse-image match exploration, and on-chain ledger auditing.
+
+### Starting the Web Dashboard
+
+1. **Terminal 1: Start the Local Hardhat Node**
+   ```bash
+   npm run node
+   ```
+   *(Note: Hardhat runs an isolated local Ethereum network on `http://127.0.0.1:8545` for development, gas-free testing, and instant block confirmation).*
+
+2. **Terminal 2: Launch the Streamlit Frontend**
+   ```bash
+   streamlit run frontend/app.py
+   ```
+   *(Or using the project virtual environment: `.venv\Scripts\streamlit.exe run frontend/app.py`)*
+
+3. **Open the Browser**
+   Navigate to `http://localhost:8501` to view the application.
+
+### Using the Frontend Interface
+
+4. **Upload a Face Image:**
+   Drag and drop or select any portrait or photo from your computer (`.jpg`, `.jpeg`, `.png`, `.webp`) in the sidebar, or select the preloaded `input/sample.jpg`.
+5. **Select Search Mode:**
+   - **Cached Search:** Uses pre-existing discovered search results to conserve external search quotas and enable repeatable local demonstrations.
+   - **Live Google Lens Search:** Dispatches a live query to SerpApi Google Lens using your configured `SERPAPI_API_KEY`.
+6. **Execute Verification:**
+   Click the prominent **🚀 Run Verification** button in the sidebar. Real-time progress indicators track execution across all pipeline stages.
+7. **Inspect Face Detection Tab:**
+   View the uploaded image annotated with YuNet's bounding box and five facial landmarks (eyes, nose, mouth corners), the cropped primary face, detection confidence score, and SFace feature vector shape (`128-d float32`).
+8. **Inspect Web Matches Tab:**
+   Explore visual/web occurrences discovered by Google Lens, categorized by match type with domain badges (LinkedIn, GitHub, TheCollector, etc.), snippets, and clickable links.
+9. **Inspect Evidence & SHA-256 Tab:**
+   Review the exact deterministic canonical evidence JSON payload, payload size, copyable 64-character lowercase SHA-256 digest, and Solidity `bytes32` representation.
+10. **Inspect Blockchain Tab:**
+    Audit on-chain contract coordinates, uploader account, transaction hash, block number, gas used, and registration status:
+    - **`NEWLY ANCHORED`:** Fresh evidence hash registered and mined on the local ledger.
+    - **`ALREADY ANCHORED`:** Evidence hash was previously recorded; existing proof is verified without duplicate transaction submission.
+11. **Check Final Verification Verdict:**
+    Examine the prominent **PASS / FAIL** card confirming that the off-chain computed evidence digest matches the immutable on-chain record. You can upload another image and repeat the workflow at any time.
+
+### Architectural Guarantees & Identity Disclaimer
+- **Local Blockchain:** The smart contract runs strictly on a local sandboxed Hardhat Ethereum node (`31337`). No public cryptocurrency or MetaMask wallets are required.
+- **Evidence Integrity Only:** Blockchain anchoring verifies that the canonical evidence payload existed in that exact state at or before the recorded block timestamp and has not been altered.
+- **Identity Disclaimer:** **Matching visual/web content discovered by Google Lens does NOT independently prove or confirm a person's real-world identity.** The application neither infers nor confirms identity; it strictly verifies public web evidence and cryptographic ledger integrity.
+
 ---
 
-## End-to-End Pipeline (Phase 6)
+## End-to-End Pipeline (CLI)
 
-The complete verification workflow integrates face detection, primary face selection, reverse-image search, deterministic evidence canonicalization, SHA-256 cryptographic hashing, and immutable on-chain smart contract anchoring into a unified CLI application.
+The complete verification workflow can also be executed via the CLI in `app/main.py`:
 
 ### Pipeline Workflow
 
