@@ -150,7 +150,7 @@ def run_pipeline(
     # --------------------------------------------------------------------------
     # STAGE 1: Face Detection
     # --------------------------------------------------------------------------
-    print("\n[1/6] Face Detection")
+    print("\n[1/7] Face Detection")
     if not img_path.is_file():
         print(f"[ERROR] Input image file not found: {img_path}")
         return 1
@@ -188,7 +188,7 @@ def run_pipeline(
     # --------------------------------------------------------------------------
     # STAGE 2: Face Selection & Feature Extraction
     # --------------------------------------------------------------------------
-    print("\n[2/6] Face Selection & Feature Extraction")
+    print("\n[2/7] Face Selection & Feature Extraction")
     try:
         selected_index, selected_face = processor.select_primary_face(faces)
         embedding, aligned_face = processor.extract_embedding(image, selected_face)
@@ -227,7 +227,7 @@ def run_pipeline(
     # --------------------------------------------------------------------------
     # STAGE 3: Reverse-Image Search
     # --------------------------------------------------------------------------
-    print("\n[3/6] Reverse-Image Search")
+    print("\n[3/7] Reverse-Image Search")
     cached_results_path = out_dir / "search_results.json"
     search_summary: Optional[SearchSummary] = None
 
@@ -274,7 +274,7 @@ def run_pipeline(
     # --------------------------------------------------------------------------
     # STAGE 4: Candidate Face Matching & Verification (SFace Cosine Similarity)
     # --------------------------------------------------------------------------
-    print("\n[4/6] Candidate Face Matching & Verification")
+    print("\n[4/7] Candidate Face Matching & Verification")
     print(f"      Similarity thresh: {similarity_threshold * 100:.1f}%")
     print(f"      Candidates:        {len(search_summary.results)}")
 
@@ -323,7 +323,7 @@ def run_pipeline(
     # --------------------------------------------------------------------------
     # STAGE 5: Evidence Hashing (Accepted Matches Only)
     # --------------------------------------------------------------------------
-    print("\n[5/6] Evidence Hashing")
+    print("\n[5/7] Evidence Hashing")
     try:
         canonical_dict = canonicalize_search_evidence([m.result for m in accepted_matches])
         canonical_bytes = serialize_canonical_json(canonical_dict)
@@ -343,9 +343,9 @@ def run_pipeline(
     print(f"      Hash file saved:  {hash_txt_path.name}")
 
     # --------------------------------------------------------------------------
-    # STAGE 5: Blockchain Anchoring
+    # STAGE 6: Blockchain Anchoring
     # --------------------------------------------------------------------------
-    print("\n[5/6] Blockchain Anchoring")
+    print("\n[6/7] Blockchain Anchoring")
     client = blockchain_client or BlockchainClient()
 
     try:
@@ -403,9 +403,9 @@ def run_pipeline(
             return 1
 
     # --------------------------------------------------------------------------
-    # STAGE 6: Blockchain Verification & Audit Verdict
+    # STAGE 7: Blockchain Verification & Audit Verdict
     # --------------------------------------------------------------------------
-    print("\n[6/6] Blockchain Verification")
+    print("\n[7/7] Blockchain Verification")
     try:
         is_verified = client.verify_evidence(hex_hash)
         on_chain_record = client.get_evidence(hex_hash)
