@@ -43,6 +43,7 @@ from app.face.face_processor import (
     ModelNotFoundError,
     NoFaceDetectedError,
 )
+from app.face.face_matcher import CandidateFaceMatcher, CandidateMatch
 from app.search.reverse_image_search import (
     ImageValidationError,
     NormalizedSearchResult,
@@ -118,6 +119,8 @@ def run_pipeline(
     use_cached_search: bool = False,
     max_results: int = 5,
     score_threshold: float = 0.6,
+    similarity_threshold: float = 0.90,
+    face_matcher: Optional[CandidateFaceMatcher] = None,
     blockchain_client: Optional[BlockchainClient] = None,
 ) -> int:
     """Execute the end-to-end face verification and blockchain anchoring pipeline.
@@ -128,6 +131,8 @@ def run_pipeline(
         use_cached_search: If True, uses cached search results from output directory.
         max_results: Number of representative search matches to display.
         score_threshold: Face detection confidence threshold (YuNet).
+        similarity_threshold: Face recognition cosine similarity threshold (SFace, default 0.90 = 90%).
+        face_matcher: Optional pre-configured CandidateFaceMatcher instance.
         blockchain_client: Optional pre-configured BlockchainClient (useful for testing).
 
     Returns:
@@ -266,25 +271,61 @@ def run_pipeline(
             print(f"[ERROR] Unexpected search error: {err}")
             return 1
 
-    print(f"      Public matches:   {search_summary.total_results_count} visual/web occurrences found")
-    print(f"      Representative matches (top {min(max_results, len(search_summary.results))}):")
-    for idx, match in enumerate(search_summary.results[:max_results], start=1):
-        clean_title = match.title.encode("ascii", errors="replace").decode("ascii")
-        clean_source = match.source.encode("ascii", errors="replace").decode("ascii")
-        clean_url = match.url.encode("ascii", errors="replace").decode("ascii")
-        print(f"        #{idx} [{match.result_type.upper()}] {clean_source}: {clean_title[:42]}")
-        print(f"           URL: {clean_url}")
+    # --------------------------------------------------------------------------
+    # STAGE 4: Candidate Face Matching & Verification (SFace Cosine Similarity)
+    # --------------------------------------------------------------------------
+    print("\n[4/6] Candidate Face Matching & Verification")
+    print(f"      Similarity thresh: {similarity_threshold * 100:.1f}%")
+    print(f"      Candidates:        {len(search_summary.results)}")
+
+    matcher = face_matcher or CandidateFaceMatcher(
+        processor=processor, default_threshold=similarity_threshold
+    )
+    accepted_matches, rejected_candidates = matcher.verify_candidates(
+        candidates=search_summary.results,
+        target_embedding=embedding,
+        threshold=similarity_threshold,
+    )
+
+    actual_match_count = len(accepted_matches)
+    match_found = actual_match_count > 0
+
+    print(f"      Accepted matches:  {actual_match_count} (>= {similarity_threshold * 100:.1f}%)")
+    print(f"      Rejected count:    {len(rejected_candidates)} (< {similarity_threshold * 100:.1f}% or no face)")
+
+    # Print candidate evaluation breakdown
+    display_candidates = (accepted_matches + rejected_candidates)[:max_results]
+    for idx, cm in enumerate(display_candidates, start=1):
+        status_tag = "ACCEPTED" if cm.is_match else "REJECTED"
+        pct_str = f"{cm.similarity_percent:.1f}%" if cm.face_detected else "No Face"
+        clean_title = cm.result.title.encode("ascii", errors="replace").decode("ascii")[:35]
+        clean_source = cm.result.source.encode("ascii", errors="replace").decode("ascii")
+        print(f"        #{idx} [{status_tag}] Similarity: {pct_str} | {clean_source}: {clean_title}")
+
+    if not match_found:
+        print("\n      " + "=" * 60)
+        print("      NO MATCHING WEB CONTENT FOUND")
+        print(f"      0 candidates reached the {similarity_threshold * 100:.1f}% similarity threshold.")
+        print("      Blockchain verification not performed because no matching web/social evidence was discovered.")
+        print("      " + "=" * 60)
+        print("\n" + "=" * 70)
+        print("FINAL RESULT: NO MATCH FOUND")
+        print("=" * 70)
+        print(f"No matching web/social content reached the {similarity_threshold * 100:.1f}% similarity threshold.")
+        print("Blockchain verification not performed because no matching web/social evidence was discovered.")
+        print("=" * 70)
+        return 0
 
     print("\n      [Identity Disclaimer]")
     print("      Matching public web content found above indicates web-indexed occurrences.")
     print("      These search results do NOT prove or confirm the real-world identity of the person.")
 
     # --------------------------------------------------------------------------
-    # STAGE 4: Evidence Hashing
+    # STAGE 5: Evidence Hashing (Accepted Matches Only)
     # --------------------------------------------------------------------------
-    print("\n[4/6] Evidence Hashing")
+    print("\n[5/6] Evidence Hashing")
     try:
-        canonical_dict = canonicalize_search_evidence(search_summary)
+        canonical_dict = canonicalize_search_evidence([m.result for m in accepted_matches])
         canonical_bytes = serialize_canonical_json(canonical_dict)
         hex_hash = compute_sha256(canonical_bytes)
 
@@ -297,7 +338,7 @@ def run_pipeline(
         print(f"[ERROR] Deterministic evidence hashing failed: {err}")
         return 1
 
-    print(f"      Canonical data:   {evidence_json_path.name} ({len(canonical_bytes)} bytes)")
+    print(f"      Canonical data:   {evidence_json_path.name} ({len(canonical_bytes)} bytes, {len(accepted_matches)} match{'es' if len(accepted_matches) != 1 else ''})")
     print(f"      SHA-256 Digest:   0x{hex_hash}")
     print(f"      Hash file saved:  {hash_txt_path.name}")
 
@@ -391,7 +432,7 @@ def run_pipeline(
     hash_matches = on_chain_hash.lower() == ("0x" + hex_hash).lower() or on_chain_hash.lower() == hex_hash.lower()
     if is_verified and hash_matches and timestamp > 0:
         print("\n" + "=" * 70)
-        print("FINAL RESULT: PASS")
+        print("FINAL RESULT: VERIFIED")
         print("=" * 70)
         print("Blockchain verification confirms that the computed evidence hash is")
         print("registered on the blockchain.")
@@ -399,9 +440,9 @@ def run_pipeline(
         return 0
     else:
         print("\n" + "=" * 70)
-        print("FINAL RESULT: FAIL")
+        print("FINAL RESULT: TAMPERED / VERIFICATION FAILED")
         print("=" * 70)
-        print("Evidence hash could not be verified on the blockchain ledger.")
+        print("Evidence hash could not be verified on the blockchain ledger or does not match.")
         print("=" * 70)
         return 2
 
@@ -442,6 +483,12 @@ def parse_args(args: Optional[List[str]] = None) -> argparse.Namespace:
         default=0.6,
         help="Confidence threshold for YuNet face detection.",
     )
+    parser.add_argument(
+        "--similarity-threshold",
+        type=float,
+        default=0.90,
+        help="Cosine similarity threshold for SFace face recognition match acceptance (default: 0.90 = 90%).",
+    )
     return parser.parse_args(args)
 
 
@@ -454,6 +501,7 @@ def main() -> None:
         use_cached_search=parsed.use_cached_search,
         max_results=parsed.max_results,
         score_threshold=parsed.score_threshold,
+        similarity_threshold=parsed.similarity_threshold,
     )
     sys.exit(exit_code)
 

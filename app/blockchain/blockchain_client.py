@@ -228,6 +228,14 @@ class BlockchainClient:
         if not self.raw_contract_address:
             raise BlockchainConfigurationError("CONTRACT_ADDRESS is not configured.")
 
+        # Validate and format contract address
+        if not Web3.is_address(self.raw_contract_address):
+            raise BlockchainConfigurationError(
+                f"Invalid Ethereum contract address format: {self.raw_contract_address}"
+            )
+
+        self.checksum_address = Web3.to_checksum_address(self.raw_contract_address)
+
         # Initialize Web3 provider
         try:
             self.w3 = Web3(Web3.HTTPProvider(self.rpc_url))
@@ -240,20 +248,25 @@ class BlockchainClient:
                 "Ensure local Hardhat node is running ('npx hardhat node')."
             )
 
-        # Validate and format contract address
-        if not Web3.is_address(self.raw_contract_address):
-            raise BlockchainConfigurationError(
-                f"Invalid Ethereum contract address format: {self.raw_contract_address}"
-            )
-
-        self.checksum_address = Web3.to_checksum_address(self.raw_contract_address)
-
         # Load ABI and instantiate contract
         self.abi = load_contract_abi(self.artifact_path)
         try:
             self.contract = self.w3.eth.contract(address=self.checksum_address, abi=self.abi)
         except Exception as exc:
             raise ContractLoadError(f"Failed to load contract at {self.checksum_address}: {exc}") from exc
+
+        # Verify contract bytecode exists at address
+        try:
+            code = self.w3.eth.get_code(self.checksum_address)
+            if not code or code == b"" or code == b"\x00":
+                raise ContractLoadError(
+                    f"No contract bytecode deployed at {self.checksum_address}. "
+                    "Ensure local node is running and deploy the contract: 'npm run deploy'."
+                )
+        except ContractLoadError:
+            raise
+        except Exception:
+            pass
 
         # Set up signing account if private key is present
         if self.private_key:

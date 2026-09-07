@@ -119,6 +119,13 @@ st.markdown(
         padding: 1.2rem;
         margin: 1rem 0;
     }
+    .verdict-nomatch {
+        background: rgba(23, 162, 184, 0.12);
+        border: 1px solid rgba(23, 162, 184, 0.4);
+        border-radius: 8px;
+        padding: 1.2rem;
+        margin: 1rem 0;
+    }
     .disclaimer-box {
         background: rgba(255, 193, 7, 0.08);
         border-left: 4px solid #ffc107;
@@ -186,10 +193,27 @@ def check_system_status() -> Dict[str, Any]:
     yunet_ok = (REPO_ROOT / "models" / "face_detection_yunet.onnx").is_file()
     sface_ok = (REPO_ROOT / "models" / "face_recognition_sface.onnx").is_file()
 
+    # Check if contract bytecode is deployed on the running node
+    contract_deployed = False
+    if hardhat_online and contract_addr:
+        try:
+            req = urllib.request.Request(
+                rpc_url,
+                data=json.dumps({"jsonrpc": "2.0", "method": "eth_getCode", "params": [contract_addr, "latest"], "id": 2}).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+            )
+            with urllib.request.urlopen(req, timeout=0.8) as resp:
+                res_data = json.loads(resp.read().decode("utf-8"))
+                code = res_data.get("result", "0x")
+                contract_deployed = code not in ("0x", "0x0", "")
+        except Exception:
+            contract_deployed = False
+
     return {
         "hardhat_online": hardhat_online,
         "rpc_url": rpc_url,
         "contract_configured": bool(contract_addr),
+        "contract_deployed": contract_deployed,
         "contract_address": contract_addr,
         "serpapi_ready": api_key_set,
         "models_ready": yunet_ok and sface_ok,
@@ -245,6 +269,14 @@ def render_sidebar(sys_status: Dict[str, Any]) -> Dict[str, Any]:
             step=0.05,
             help="YuNet minimum confidence threshold for face detection.",
         )
+        similarity_threshold = st.slider(
+            "Face Match Threshold (%)",
+            min_value=50,
+            max_value=100,
+            value=90,
+            step=1,
+            help="SFace cosine similarity threshold for accepting candidate web matches (default: 90%).",
+        ) / 100.0
 
         st.markdown("---")
 
@@ -260,11 +292,17 @@ def render_sidebar(sys_status: Dict[str, Any]) -> Dict[str, Any]:
                 st.markdown("🔴 **Hardhat Node:** Offline")
                 st.caption("Start with: `npm run node`")
 
-            if sys_status["contract_configured"]:
+            if not sys_status["contract_configured"]:
+                st.markdown("🔴 **Contract:** Not configured in `.env`")
+            elif sys_status["hardhat_online"] and sys_status.get("contract_deployed", False):
                 short_addr = sys_status["contract_address"][:8] + "..." + sys_status["contract_address"][-6:]
                 st.markdown(f"🟢 **Contract:** `{short_addr}`")
+            elif sys_status["hardhat_online"]:
+                st.markdown("🟡 **Contract:** Node running but not deployed")
+                st.caption("Deploy with: `npm run deploy`")
             else:
-                st.markdown("🔴 **Contract:** Not configured in `.env`")
+                short_addr = sys_status["contract_address"][:8] + "..." + sys_status["contract_address"][-6:]
+                st.markdown(f"⚪ **Contract:** `{short_addr}`")
 
             if sys_status["serpapi_ready"]:
                 st.markdown("🟢 **SerpApi Key:** Configured")
@@ -282,6 +320,7 @@ def render_sidebar(sys_status: Dict[str, Any]) -> Dict[str, Any]:
             "search_mode": search_mode,
             "max_results": max_results,
             "score_threshold": score_threshold,
+            "similarity_threshold": similarity_threshold,
             "run_clicked": run_btn,
         }
 
@@ -301,26 +340,39 @@ def save_runtime_upload(uploaded_file) -> Path:
     return dest_path
 
 
-def render_pipeline_flow(current_stage: Optional[str] = None):
+def render_pipeline_flow(match_found: bool = True):
     """Display an interactive horizontal pipeline status diagram."""
-    stages = [
-        ("UPLOAD", "Image Received"),
-        ("FACE DETECTION", "YuNet ONNX"),
-        ("GOOGLE LENS", "Reverse Search"),
-        ("EVIDENCE", "Canonical JSON"),
-        ("SHA-256", "Crypto Digest"),
-        ("BLOCKCHAIN", "EvidenceRegistry"),
-        ("VERIFY", "Audit Verdict"),
-    ]
+    if match_found:
+        stages = [
+            ("UPLOAD", "Image Received", "#4dabf7"),
+            ("FACE DETECT", "YuNet ONNX", "#4dabf7"),
+            ("GOOGLE LENS", "Candidates Found", "#4dabf7"),
+            ("FACE MATCH", "SFace >= 90%", "#28a745"),
+            ("EVIDENCE", "Canonical JSON", "#4dabf7"),
+            ("SHA-256", "Crypto Digest", "#4dabf7"),
+            ("BLOCKCHAIN", "EvidenceRegistry", "#4dabf7"),
+            ("VERIFY", "Audit Verdict", "#28a745"),
+        ]
+    else:
+        stages = [
+            ("UPLOAD", "Image Received", "#4dabf7"),
+            ("FACE DETECT", "YuNet ONNX", "#4dabf7"),
+            ("GOOGLE LENS", "Search Done", "#4dabf7"),
+            ("FACE MATCH", "0 Matches >= 90%", "#ffc107"),
+            ("EVIDENCE", "Skipped", "#888888"),
+            ("SHA-256", "Skipped", "#888888"),
+            ("BLOCKCHAIN", "Not Applicable", "#888888"),
+            ("VERIFY", "No Match Found", "#17a2b8"),
+        ]
 
     cols = st.columns(len(stages))
-    for i, (col, (name, subtitle)) in enumerate(zip(cols, stages)):
+    for i, (col, (name, subtitle, color)) in enumerate(zip(cols, stages)):
         with col:
             st.markdown(
                 f"""
                 <div style="text-align: center; padding: 0.4rem 0.2rem; border-radius: 6px; 
                             background: rgba(255, 255, 255, 0.03); border: 1px solid rgba(128, 128, 128, 0.2);">
-                    <div style="font-size: 0.72rem; font-weight: 700; color: #4dabf7;">{i+1}. {name}</div>
+                    <div style="font-size: 0.72rem; font-weight: 700; color: {color};">{i+1}. {name}</div>
                     <div style="font-size: 0.65rem; color: #888888;">{subtitle}</div>
                 </div>
                 """,
@@ -337,9 +389,12 @@ def render_overview_tab(result: Dict[str, Any]):
     evidence = result.get("evidence", {})
 
     verdict = verification.get("verdict", "UNKNOWN")
+    match_found = search.get("match_found", False)
+    actual_matches = search.get("actual_match_count", 0)
+    sim_thresh = search.get("similarity_threshold", 0.90)
 
     # Final prominent verification card
-    if verdict == "PASS":
+    if verdict in ("PASS", "VERIFIED") and match_found:
         st.markdown(
             f"""
             <div class="verdict-pass">
@@ -347,10 +402,29 @@ def render_overview_tab(result: Dict[str, Any]):
                     <div style="font-size: 2rem;">✅</div>
                     <div>
                         <div style="font-size: 1.4rem; font-weight: 700; color: #28a745;">
-                            PASS — Evidence Integrity Verified on Blockchain
+                            VERIFIED — Evidence Integrity Confirmed on Blockchain
                         </div>
                         <div style="font-size: 0.95rem; color: #c3e6cb; margin-top: 0.2rem;">
-                            Blockchain verification confirms that the computed evidence digest matches the immutable record anchored on the ledger.
+                            Matching web/social content verified ({actual_matches} occurrence{'s' if actual_matches != 1 else ''} with &ge;{sim_thresh * 100:.0f}% facial similarity). Blockchain verification confirms that the computed evidence digest matches the immutable on-chain record.
+                        </div>
+                    </div>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    elif verdict in ("NO MATCH FOUND", "NO_MATCH_FOUND") or not match_found:
+        st.markdown(
+            f"""
+            <div class="verdict-nomatch">
+                <div style="display: flex; align-items: center; gap: 0.8rem;">
+                    <div style="font-size: 2rem;">ℹ️</div>
+                    <div>
+                        <div style="font-size: 1.4rem; font-weight: 700; color: #17a2b8;">
+                            NO MATCH FOUND
+                        </div>
+                        <div style="font-size: 0.95rem; color: #bee5eb; margin-top: 0.2rem;">
+                            No candidate web/social content reached the {sim_thresh * 100:.0f}% facial similarity threshold. Blockchain verification was not performed because no matching evidence was accepted.
                         </div>
                     </div>
                 </div>
@@ -366,10 +440,10 @@ def render_overview_tab(result: Dict[str, Any]):
                     <div style="font-size: 2rem;">❌</div>
                     <div>
                         <div style="font-size: 1.4rem; font-weight: 700; color: #dc3545;">
-                            FAIL — Evidence Integrity Could Not Be Verified
+                            TAMPERED / VERIFICATION FAILED
                         </div>
                         <div style="font-size: 0.95rem; color: #f5c6cb; margin-top: 0.2rem;">
-                            {verification.get("message", "Evidence hash does not exist on-chain or verification failed.")}
+                            {verification.get("message", "Evidence hash could not be verified on the blockchain ledger or does not match.")}
                         </div>
                     </div>
                 </div>
@@ -378,16 +452,28 @@ def render_overview_tab(result: Dict[str, Any]):
             unsafe_allow_html=True,
         )
 
+    # Mandatory Identity Disclaimer
+    st.markdown(
+        """
+        <div class="disclaimer-box">
+            <strong>⚠️ Mandatory Identity Disclaimer:</strong><br>
+            Matching public web content indicates web-indexed occurrences.
+            Search results and blockchain verification do <strong>NOT</strong> prove or confirm the real-world identity of the person.
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
     # Key metrics row
     m1, m2, m3, m4, m5 = st.columns(5)
     with m1:
         st.metric("Faces Detected", face.get("face_count", 0))
     with m2:
-        st.metric("Web Matches", search.get("total_results", 0))
+        st.metric("Actual Matches", actual_matches if match_found else 0)
     with m3:
         st.metric("Visual Matches", search.get("visual_matches", 0))
     with m4:
-        st.metric("Blockchain Status", blockchain.get("status", "N/A"))
+        st.metric("Blockchain Status", blockchain.get("status", "NOT APPLICABLE"))
     with m5:
         st.metric("Ledger Verdict", verdict)
 
@@ -405,12 +491,18 @@ def render_overview_tab(result: Dict[str, Any]):
 
     with col_b:
         st.markdown("#### ⛓️ Cryptographic & Ledger Proof")
-        st.markdown(f"- **Evidence SHA-256:** `{evidence.get('sha256')}`")
-        st.markdown(f"- **Contract Address:** `{blockchain.get('contract_address')}`")
-        st.markdown(f"- **Anchoring Status:** `{blockchain.get('status')}`")
-        st.markdown(f"- **Block Timestamp:** `{blockchain.get('timestamp_utc')}` (UNIX `{blockchain.get('timestamp')}`)")
-        if blockchain.get("transaction_hash"):
-            st.markdown(f"- **Tx Hash:** `{blockchain.get('transaction_hash')}`")
+        if match_found:
+            st.markdown(f"- **Evidence SHA-256:** `{evidence.get('sha256')}`")
+            st.markdown(f"- **Contract Address:** `{blockchain.get('contract_address')}`")
+            st.markdown(f"- **Anchoring Status:** `{blockchain.get('status')}`")
+            st.markdown(f"- **Block Timestamp:** `{blockchain.get('timestamp_utc')}` (UNIX `{blockchain.get('timestamp')}`)")
+            if blockchain.get("transaction_hash"):
+                st.markdown(f"- **Tx Hash:** `{blockchain.get('transaction_hash')}`")
+        else:
+            st.markdown("- **Evidence Generation:** `NOT GENERATED`")
+            st.markdown("- **Blockchain Anchoring:** `NOT APPLICABLE`")
+            st.markdown("- **Verification Status:** `NOT APPLICABLE`")
+            st.markdown("- **Ledger Record:** `None (No search matches discovered)`")
 
 
 def render_face_detection_tab(result: Dict[str, Any]):
@@ -452,6 +544,8 @@ def render_search_tab(result: Dict[str, Any]):
     """Render the Web Matches tab with categorized visual matches."""
     search = result.get("search", {})
     results = search.get("results", [])
+    match_found = search.get("match_found", False)
+    actual_matches = search.get("actual_match_count", 0)
 
     st.markdown("### 🌐 Public Web & Reverse-Image Matches")
     st.markdown(
@@ -465,25 +559,70 @@ def render_search_tab(result: Dict[str, Any]):
         unsafe_allow_html=True,
     )
 
+    actual_matches = search.get("actual_match_count", 0)
+    match_found = search.get("match_found", False)
+    accepted_matches = search.get("accepted_matches", [])
+    rejected_candidates = search.get("rejected_candidates", [])
+    sim_thresh = search.get("similarity_threshold", 0.90)
+
     c1, c2, c3, c4 = st.columns(4)
     with c1:
         st.metric("Search Service", search.get("service", "SerpApi"))
     with c2:
         st.metric("Search Mode", search.get("mode", "CACHED"))
     with c3:
-        st.metric("Visual Matches", search.get("visual_matches", 0))
+        st.metric("Accepted Matches", f"{actual_matches} (≥{sim_thresh*100:.0f}%)")
     with c4:
         st.metric("Total Public Results", search.get("total_results", 0))
 
     st.markdown("---")
-    st.markdown(f"#### Top Representative Matches ({len(results)} shown)")
 
-    if not results:
-        st.info("No matching web results found.")
+    if not match_found or actual_matches == 0:
+        st.info(
+            f"ℹ️ **NO MATCHING WEB CONTENT FOUND**\n\n"
+            f"None of the candidate results reached the required **{sim_thresh*100:.0f}%** face similarity threshold. "
+            f"Blockchain verification was not performed because no matching web/social evidence was discovered."
+        )
+        if rejected_candidates:
+            with st.expander(f"🚫 Evaluated Candidates Below {sim_thresh*100:.0f}% Threshold ({len(rejected_candidates)})", expanded=True):
+                for idx, item in enumerate(rejected_candidates, start=1):
+                    col_thumb, col_info = st.columns([1, 4])
+                    with col_thumb:
+                        thumb = item.get("thumbnail")
+                        if thumb and thumb.startswith("http"):
+                            try:
+                                st.image(thumb, width=120)
+                            except Exception:
+                                st.markdown("🖼️ *(Thumbnail)*")
+                        else:
+                            st.markdown("🖼️ *(No thumbnail)*")
+                    with col_info:
+                        sim_pct = item.get("similarity_percent", 0.0)
+                        face_detected = item.get("face_detected", False)
+                        badge_label = f"SIMILARITY: {sim_pct:.1f}% (REJECTED < {sim_thresh*100:.0f}%)" if face_detected else "NO FACE DETECTED (REJECTED)"
+                        st.markdown(
+                            f"""
+                            <div style="display: flex; gap: 0.5rem; align-items: center; margin-bottom: 0.3rem;">
+                                <span style="background: rgba(220,53,69,0.2); color: #dc3545; border: 1px solid rgba(220,53,69,0.4); padding: 2px 8px; border-radius: 4px; font-weight: 700; font-size: 0.75rem;">{badge_label}</span>
+                                <span class="match-badge badge-source">{item.get('source', 'Web')}</span>
+                                <span style="font-weight: 600; font-size: 1.05rem;">#{idx} {item.get('title', 'Untitled Match')}</span>
+                            </div>
+                            """,
+                            unsafe_allow_html=True,
+                        )
+                        url = item.get("url", "")
+                        if url:
+                            st.markdown(f"🔗 [**{url}**]({url})")
+                        if item.get("snippet"):
+                            st.caption(item.get("snippet"))
+                    st.markdown("<hr style='margin: 0.5rem 0; border: none; border-top: 1px solid rgba(128,128,128,0.15);'>", unsafe_allow_html=True)
         return
 
+    st.success(f"✅ Matching web/social content verified ({actual_matches} face matches ≥ {sim_thresh*100:.0f}%).")
+    st.markdown(f"#### Accepted Face Matches ({len(accepted_matches)} verified)")
+
     # Display results as clean cards
-    for idx, item in enumerate(results, start=1):
+    for idx, item in enumerate(accepted_matches, start=1):
         with st.container():
             col_thumb, col_info = st.columns([1, 4])
             with col_thumb:
@@ -498,9 +637,11 @@ def render_search_tab(result: Dict[str, Any]):
 
             with col_info:
                 badge_class = "badge-exact" if item.get("result_type") == "exact_match" else "badge-visual"
+                sim_pct = item.get("similarity_percent", 0.0)
                 st.markdown(
                     f"""
                     <div style="display: flex; gap: 0.5rem; align-items: center; margin-bottom: 0.3rem;">
+                        <span style="background: rgba(40,167,69,0.2); color: #28a745; border: 1px solid rgba(40,167,69,0.4); padding: 2px 8px; border-radius: 4px; font-weight: 700; font-size: 0.75rem;">FACE MATCH: {sim_pct:.1f}% (≥ {sim_thresh*100:.0f}%)</span>
                         <span class="match-badge {badge_class}">{item.get('result_type', 'match').upper()}</span>
                         <span class="match-badge badge-source">{item.get('source', 'Web')}</span>
                         <span style="font-weight: 600; font-size: 1.05rem;">#{idx} {item.get('title', 'Untitled Match')}</span>
@@ -516,6 +657,40 @@ def render_search_tab(result: Dict[str, Any]):
 
             st.markdown("<hr style='margin: 0.5rem 0; border: none; border-top: 1px solid rgba(128,128,128,0.15);'>", unsafe_allow_html=True)
 
+    if rejected_candidates:
+        with st.expander(f"🚫 Evaluated Candidates Below Threshold ({len(rejected_candidates)})", expanded=False):
+            for idx, item in enumerate(rejected_candidates, start=1):
+                col_thumb, col_info = st.columns([1, 4])
+                with col_thumb:
+                    thumb = item.get("thumbnail")
+                    if thumb and thumb.startswith("http"):
+                        try:
+                            st.image(thumb, width=120)
+                        except Exception:
+                            st.markdown("🖼️ *(Thumbnail)*")
+                    else:
+                        st.markdown("🖼️ *(No thumbnail)*")
+                with col_info:
+                    sim_pct = item.get("similarity_percent", 0.0)
+                    face_detected = item.get("face_detected", False)
+                    badge_label = f"SIMILARITY: {sim_pct:.1f}% (REJECTED < {sim_thresh*100:.0f}%)" if face_detected else "NO FACE DETECTED (REJECTED)"
+                    st.markdown(
+                        f"""
+                        <div style="display: flex; gap: 0.5rem; align-items: center; margin-bottom: 0.3rem;">
+                            <span style="background: rgba(220,53,69,0.2); color: #dc3545; border: 1px solid rgba(220,53,69,0.4); padding: 2px 8px; border-radius: 4px; font-weight: 700; font-size: 0.75rem;">{badge_label}</span>
+                            <span class="match-badge badge-source">{item.get('source', 'Web')}</span>
+                            <span style="font-weight: 600; font-size: 1.05rem;">#{idx} {item.get('title', 'Untitled Match')}</span>
+                        </div>
+                        """,
+                        unsafe_allow_html=True,
+                    )
+                    url = item.get("url", "")
+                    if url:
+                        st.markdown(f"🔗 [**{url}**]({url})")
+                    if item.get("snippet"):
+                        st.caption(item.get("snippet"))
+                st.markdown("<hr style='margin: 0.5rem 0; border: none; border-top: 1px solid rgba(128,128,128,0.15);'>", unsafe_allow_html=True)
+
     with st.expander("🔍 View Raw Search Results JSON"):
         st.json(search)
 
@@ -526,6 +701,14 @@ def render_evidence_tab(result: Dict[str, Any]):
     search = result.get("search", {})
 
     st.markdown("### 🔒 Canonical Evidence & Deterministic SHA-256 Digest")
+
+    if not evidence.get("generated", False):
+        st.info(
+            "ℹ️ **No Evidence Generated**\n\n"
+            "Blockchain verification not performed because no matching web/social evidence was discovered. "
+            "No canonical evidence JSON was structured and no SHA-256 digest was computed."
+        )
+        return
 
     c1, c2 = st.columns(2)
     with c1:
@@ -572,6 +755,16 @@ def render_blockchain_tab(result: Dict[str, Any]):
     evidence = result.get("evidence", {})
 
     st.markdown("### ⛓️ Hardhat Local Ethereum Blockchain Ledger")
+
+    if not blockchain.get("attempted", False):
+        st.info(
+            "ℹ️ **Blockchain Verification Not Performed (NOT APPLICABLE)**\n\n"
+            "Blockchain verification was not performed because no matching web/social evidence was discovered.\n\n"
+            "- **Blockchain Status:** `NOT APPLICABLE`\n"
+            "- **Verification Status:** `NOT APPLICABLE`\n"
+            "- **On-Chain Transactions:** `None`"
+        )
+        return
 
     col_l, col_r = st.columns(2)
 
@@ -669,6 +862,17 @@ def main():
             st.error("❌ **`CONTRACT_ADDRESS` is missing in `.env`.** Please deploy the contract first.")
             return
 
+        # Check if contract is deployed on the running node
+        if sys_status["hardhat_online"] and not sys_status.get("contract_deployed", False):
+            st.error(
+                "❌ **Contract is not deployed on the running Hardhat node.**\n\n"
+                "The node was restarted or the contract has not been deployed yet. Deploy it with:\n"
+                "```bash\n"
+                "npm run deploy\n"
+                "```"
+            )
+            return
+
         # Progress UI
         progress_bar = st.progress(0, text="Initializing pipeline...")
         status_text = st.empty()
@@ -685,6 +889,7 @@ def main():
                 use_cached_search=use_cached,
                 max_results=sidebar_params["max_results"],
                 score_threshold=sidebar_params["score_threshold"],
+                similarity_threshold=sidebar_params["similarity_threshold"],
                 progress_callback=on_progress,
             )
             progress_bar.empty()
@@ -706,7 +911,8 @@ def main():
     # Render results if available
     result = st.session_state.get("pipeline_result")
     if result:
-        render_pipeline_flow()
+        match_found = result.get("search", {}).get("match_found", False)
+        render_pipeline_flow(match_found=match_found)
 
         tabs = st.tabs([
             "📊 Overview",

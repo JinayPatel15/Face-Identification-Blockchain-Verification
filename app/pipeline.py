@@ -40,6 +40,7 @@ from app.face.face_processor import (
     ModelNotFoundError,
     NoFaceDetectedError,
 )
+from app.face.face_matcher import CandidateFaceMatcher, CandidateMatch
 from app.search.reverse_image_search import (
     ImageValidationError,
     NormalizedSearchResult,
@@ -104,6 +105,8 @@ def execute_pipeline(
     use_cached_search: bool = False,
     max_results: int = 5,
     score_threshold: float = 0.6,
+    similarity_threshold: float = 0.90,
+    face_matcher: Optional[CandidateFaceMatcher] = None,
     blockchain_client: Optional[BlockchainClient] = None,
     progress_callback: Optional[Callable[[str, float], None]] = None,
 ) -> Dict[str, Any]:
@@ -115,6 +118,8 @@ def execute_pipeline(
         use_cached_search: If True, uses cached search results.
         max_results: Number of representative search matches to return/display.
         score_threshold: Face detection confidence threshold (YuNet).
+        similarity_threshold: Face recognition cosine similarity threshold (SFace, default 0.90 = 90%).
+        face_matcher: Optional pre-configured CandidateFaceMatcher instance.
         blockchain_client: Optional pre-configured BlockchainClient instance.
         progress_callback: Optional callback receiving (stage_name, fraction_complete).
 
@@ -230,7 +235,7 @@ def execute_pipeline(
     search_summary: Optional[SearchSummary] = None
 
     if use_cached_search:
-        update_progress("Loading cached search results", 0.50)
+        update_progress("Loading cached search results", 0.45)
         try:
             search_summary = load_cached_search_results(cached_results_path)
             search_mode = "CACHED"
@@ -249,7 +254,7 @@ def execute_pipeline(
                 "face": face_info,
             }
     else:
-        update_progress("Executing live Google Lens reverse search via SerpApi", 0.50)
+        update_progress("Executing live Google Lens reverse search via SerpApi", 0.45)
         api_key = get_api_key()
         if not api_key:
             return {
@@ -275,23 +280,98 @@ def execute_pipeline(
         except Exception as err:
             return {"success": False, "stage_failed": "search", "error": f"Unexpected search error: {err}", "face": face_info}
 
+    # --------------------------------------------------------------------------
+    # STAGE 4: Candidate Face Matching & Verification (SFace Cosine Similarity)
+    # --------------------------------------------------------------------------
+    update_progress("Verifying candidate faces with SFace cosine similarity", 0.60)
+    matcher = face_matcher or CandidateFaceMatcher(
+        processor=processor, default_threshold=similarity_threshold
+    )
+    accepted_matches, rejected_candidates = matcher.verify_candidates(
+        candidates=search_summary.results,
+        target_embedding=embedding,
+        threshold=similarity_threshold,
+    )
+
+    actual_match_count = len(accepted_matches)
+    match_found = actual_match_count > 0
+
     search_info = {
         "service": search_summary.search_service,
         "mode": search_mode,
+        "match_found": match_found,
+        "actual_match_count": actual_match_count,
+        "similarity_threshold": similarity_threshold,
         "total_results": search_summary.total_results_count,
         "exact_matches": search_summary.exact_matches_count,
         "visual_matches": search_summary.visual_matches_count,
         "related_content": search_summary.related_content_count,
         "results": [r.to_dict() for r in search_summary.results],
         "results_path": str(cached_results_path),
+        "accepted_matches": [m.to_dict() for m in accepted_matches],
+        "rejected_candidates": [m.to_dict() for m in rejected_candidates],
+        "all_candidates": [m.to_dict() for m in (accepted_matches + rejected_candidates)],
     }
 
     # --------------------------------------------------------------------------
-    # STAGE 4: Evidence Hashing
+    # NO MATCH BRANCH: Skip Evidence Hashing & Blockchain Verification
     # --------------------------------------------------------------------------
-    update_progress("Structuring canonical evidence & computing SHA-256 digest", 0.70)
+    if not match_found:
+        update_progress("No candidate reached similarity threshold; skipping blockchain anchoring", 1.0)
+        evidence_info = {
+            "generated": False,
+            "canonical_evidence": None,
+            "sha256": None,
+            "hex_hash": None,
+            "bytes32_hex": None,
+            "payload_size_bytes": 0,
+            "evidence_json_path": None,
+            "hash_txt_path": None,
+        }
+        blockchain_info = {
+            "attempted": False,
+            "status": "NOT APPLICABLE",
+            "network": "Hardhat Local Ethereum",
+            "rpc_url": None,
+            "contract_address": None,
+            "signer_account": None,
+            "already_anchored": False,
+            "transaction_hash": None,
+            "block_number": None,
+            "gas_used": None,
+            "timestamp": 0,
+            "timestamp_utc": "N/A",
+            "on_chain_hash": "",
+            "uploader": "",
+        }
+        verification_info = {
+            "verified": False,
+            "status": "NOT APPLICABLE",
+            "verdict": "NO MATCH FOUND",
+            "computed_hash": None,
+            "on_chain_hash": "",
+            "message": (
+                f"Blockchain verification not performed because 0 candidates reached the "
+                f"{similarity_threshold * 100:.0f}% face similarity threshold."
+            ),
+        }
+        return {
+            "success": True,
+            "error": None,
+            "stage_failed": None,
+            "face": face_info,
+            "search": search_info,
+            "evidence": evidence_info,
+            "blockchain": blockchain_info,
+            "verification": verification_info,
+        }
+
+    # --------------------------------------------------------------------------
+    # STAGE 5: Evidence Hashing (Only for Accepted Face Matches)
+    # --------------------------------------------------------------------------
+    update_progress("Structuring canonical evidence & computing SHA-256 digest", 0.75)
     try:
-        canonical_dict = canonicalize_search_evidence(search_summary)
+        canonical_dict = canonicalize_search_evidence([m.result for m in accepted_matches])
         canonical_bytes = serialize_canonical_json(canonical_dict)
         hex_hash = compute_sha256(canonical_bytes)
 
@@ -310,6 +390,7 @@ def execute_pipeline(
         }
 
     evidence_info = {
+        "generated": True,
         "canonical_evidence": canonical_dict,
         "sha256": hex_hash,
         "hex_hash": hex_hash,
@@ -428,6 +509,7 @@ def execute_pipeline(
         ts_utc = "N/A"
 
     blockchain_info = {
+        "attempted": True,
         "network": "Hardhat Local Ethereum",
         "rpc_url": str(client.rpc_url),
         "contract_address": str(client.checksum_address),
@@ -447,17 +529,18 @@ def execute_pipeline(
         on_chain_hash.lower() == ("0x" + hex_hash).lower() or on_chain_hash.lower() == hex_hash.lower()
     )
     is_valid_audit = is_verified and hash_matches and timestamp > 0
-    verdict = "PASS" if is_valid_audit else "FAIL"
+    verdict = "VERIFIED" if is_valid_audit else "TAMPERED / VERIFICATION FAILED"
 
     verification_info = {
         "computed_hash": "0x" + hex_hash,
         "on_chain_hash": on_chain_hash,
         "verified": is_verified,
+        "status": "VERIFIED" if is_valid_audit else "FAILED",
         "verdict": verdict,
         "message": (
             "Blockchain verification confirms that the computed evidence hash is registered on the blockchain."
-            if verdict == "PASS"
-            else "Evidence hash could not be verified on the blockchain ledger."
+            if is_valid_audit
+            else "TAMPERED / VERIFICATION FAILED: Computed evidence hash does not match on-chain record or verification failed."
         ),
     }
 
