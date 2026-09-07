@@ -7,7 +7,7 @@
 [![Streamlit](https://img.shields.io/badge/Streamlit-Interactive%20UI-FF4B4B.svg)](https://streamlit.io/)
 [![Tests](https://img.shields.io/badge/Tests-76%20Passing-brightgreen.svg)]()
 
-> An end-to-end pipeline that takes a face scan as input, searches the web/social media for candidate content using reverse-image search, performs **SFace facial recognition verification ($\ge 90\%$)** to accept genuine matches and reject false positives, and cryptographically anchors and audits the discovered data on an **Ethereum smart contract**.
+> An end-to-end pipeline that takes a face scan as input, searches the web/social media for candidate content using reverse-image search, performs **SFace facial recognition verification** against a configurable similarity threshold to accept genuine matches and reject false positives, and cryptographically anchors and audits the discovered data on an **Ethereum smart contract**.
 
 ---
 
@@ -56,9 +56,9 @@ The system establishes a verifiable, tamper-proof audit trail linking a source f
                  [ 3. Google Lens Reverse Search ]
                              │
                              ▼
-            [ 4. SFace Candidate Verification (Cosine Sim ≥ 90%) ]
-                ├── Sim < 90%  ➔ REJECT (False Positives Filtered Out)
-                └── Sim ≥ 90%  ➔ ACCEPT (Discovered Match Set)
+            [ 4. SFace Candidate Verification (Cosine Similarity ≥ Threshold) ]
+                ├── Similarity < Threshold  ➔ REJECT (False Positives Filtered Out)
+                └── Similarity ≥ Threshold  ➔ ACCEPT (Discovered Match Set)
                              │
             ┌────────────────┴────────────────┐
             ▼                                 ▼
@@ -84,9 +84,9 @@ FINAL RESULT: NO MATCH FOUND       [ On-Chain Proof Verification ]
    - Downloads candidate thumbnails from the web search results.
    - Detects faces in candidate images and extracts their 128-d SFace embeddings.
    - Computes cosine similarity against the query face embedding.
-   - Applies a strict default acceptance threshold of **90% (`0.90`)**:
-     - Candidates with similarity $\ge 90\%$ are **accepted** as confirmed matches (even a single accepted match is sufficient).
-     - Candidates with similarity $< 90\%$ are **rejected** as visual false positives.
+   - Evaluates candidates against a **configurable similarity threshold** (e.g. user-defined or default threshold):
+     - Candidates with similarity meeting or exceeding the threshold are **accepted** as confirmed matches (even a single accepted match is sufficient).
+     - Candidates with similarity below the threshold are **rejected** as visual false positives.
 5. **Deterministic Evidence Structuring & Hashing:**
    - Filters out non-matching candidates.
    - Structures **only accepted matches** into canonical JSON (lexicographically sorted keys, compact UTF-8, zero transient runtime paths).
@@ -102,7 +102,7 @@ FINAL RESULT: NO MATCH FOUND       [ On-Chain Proof Verification ]
 A core architectural feature is the strict separation between **search match detection** and **blockchain evidence verification**:
 - The blockchain smart contract verifies **cryptographic evidence integrity** (whether a specific hash was registered and untouched). It does *not* query the web.
 - The pipeline logic verifies **facial match presence** using SFace before creating evidence.
-- If Google Lens returns visual matches but **none reach $\ge 90\%$ face similarity**, the pipeline halts immediately, outputs `"NO MATCH FOUND"`, and **skips blockchain anchoring entirely**.
+- If Google Lens returns visual matches but **none reach the required face similarity threshold**, the pipeline halts immediately, outputs `"NO MATCH FOUND"`, and **skips blockchain anchoring entirely**.
 
 ---
 
@@ -110,8 +110,8 @@ A core architectural feature is the strict separation between **search match det
 
 | Scenario | Condition | System Verdict |
 | :--- | :--- | :--- |
-| **No Candidate $\ge 90\%$** | 0 candidates reach the 90% facial similarity threshold | `NO MATCH FOUND` |
-| **Match Verified On-Chain** | $\ge 1$ candidate $\ge 90\%$ AND computed SHA-256 matches on-chain record | `VERIFIED` |
+| **No Candidate Reaches Threshold** | 0 candidates reach the configured facial similarity threshold | `NO MATCH FOUND` |
+| **Match Verified On-Chain** | $\ge 1$ candidate meets threshold AND computed SHA-256 matches on-chain record | `VERIFIED` |
 | **Evidence Tampered** | Candidate was anchored, but evidence JSON or on-chain digest was altered | `TAMPERED / VERIFICATION FAILED` |
 
 ---
@@ -143,9 +143,9 @@ flowchart TD
         CFD["Candidate Face Detection (YuNet)"]
         CSFace["Candidate SFace Embedding Extraction"]
         COS["Cosine Similarity Evaluation"]
-        THRESH{"Cosine Sim >= 90%?"}
-        REJ["Rejected Candidate (< 90%)"]
-        ACC["Accepted Match (>= 90%)"]
+        THRESH{"Cosine Sim >= Threshold?"}
+        REJ["Rejected Candidate (< Threshold)"]
+        ACC["Accepted Match (>= Threshold)"]
     end
 
     subgraph EvidenceLayer ["5. Evidence Hashing (evidence_hasher.py)"]
@@ -197,7 +197,7 @@ Face-Identification-Blockchain-Verification/
 │   ├── face/
 │   │   ├── __init__.py
 │   │   ├── face_processor.py       # YuNet detection & SFace feature extraction
-│   │   └── face_matcher.py         # Candidate image verification & 90% threshold filtering
+│   │   └── face_matcher.py         # Candidate image verification & similarity threshold filtering
 │   ├── search/
 │   │   ├── __init__.py
 │   │   └── reverse_image_search.py # SerpApi Google Lens client & payload normalizer
@@ -410,13 +410,13 @@ BLOCKCHAIN_PRIVATE_KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7
 
 ### Running via Command-Line Interface (CLI)
 
-#### 1. Default Verification Run (Cached Search, 90% Threshold)
+#### 1. Default Verification Run (Cached Search, Configurable Threshold)
 Use the included reference image and cached search results to run the pipeline without consuming search API quota:
 ```bash
 python app/main.py --input input/sample.jpg --use-cached-search
 ```
 
-**Output when candidates are $< 90\%$ (Different Persons):**
+**Output when candidates fall below the similarity threshold (Different Persons):**
 ```text
 ======================================================================
 FACE IDENTIFICATION & BLOCKCHAIN VERIFICATION
@@ -436,17 +436,17 @@ FACE IDENTIFICATION & BLOCKCHAIN VERIFICATION
       Mode:             CACHED
 
 [4/6] Candidate Face Matching & Verification
-      Similarity thresh: 90.0%
+      Similarity thresh: Configurable (User Threshold)
       Candidates:        60
-      Accepted matches:  0 (>= 90.0%)
-      Rejected count:    60 (< 90.0% or no face)
+      Accepted matches:  0 (>= Threshold)
+      Rejected count:    60 (< Threshold or no face)
         #1 [REJECTED] Similarity: 51.0% | LinkedIn: Sahil Jana - Ex-SDE Intern
         #2 [REJECTED] Similarity: 50.1% | GitHub: dhairyashiil (Dhairyashil Shinde)
         #3 [REJECTED] Similarity: 49.0% | LinkedIn: Ayush Khatavkar - Financial
 
       ============================================================
       NO MATCHING WEB CONTENT FOUND
-      0 candidates reached the 90.0% similarity threshold.
+      0 candidates reached the similarity threshold.
       Blockchain verification not performed because no matching web/social evidence was discovered.
       ============================================================
 
@@ -519,7 +519,7 @@ Open **`http://localhost:8501`** in your browser.
 
 #### Dashboard Features
 - **Sidebar Image Upload:** Upload any `.jpg`, `.png`, or `.webp` portrait or select the preloaded sample.
-- **Interactive Threshold Slider:** Dynamically adjust the SFace Match Threshold from 50% to 100% (defaults to 90%).
+- **Interactive Threshold Slider:** Dynamically adjust the SFace Match Threshold to any arbitrary value between 50% and 100%.
 - **Interactive Horizontal Flow Diagram:** Visual progress tracking indicating stage completion or early skip branches.
 - **5 Detailed Audit Tabs:**
   1. **📊 Overview:** Displays verdict banner (`VERIFIED`, `NO MATCH FOUND`, or `TAMPERED / VERIFICATION FAILED`) and key metrics.
@@ -560,7 +560,7 @@ npx hardhat test
 
 ### 3. Face Similarity vs. Legal Real-World Identity
 - SFace cosine similarity measures visual facial geometry likeness between a query crop and a web thumbnail.
-- While a score $\ge 90\%$ confirms that the face in the web content is visually identical to the target, **it does not legally or medically confirm the real-world legal identity** of the person (e.g., does not replace passport validation, KYC document checks, or biometric liveness detection).
+- While a score meeting the configured threshold confirms that the face in the web content is visually identical to the target, **it does not legally or medically confirm the real-world legal identity** of the person (e.g., does not replace passport validation, KYC document checks, or biometric liveness detection).
 
 ### 4. Local Blockchain Sandboxed State
 - The default setup runs on a local Hardhat node in memory. If the `npm run node` process is stopped or restarted, the on-chain ledger resets unless state persistence is explicitly enabled.
@@ -568,7 +568,7 @@ npx hardhat test
 
 ### 5. Image Quality, Lighting & Extreme Head Poses
 - Low-resolution crops ($< 300\times 300$ pixels) or heavily compressed web thumbnails can reduce the confidence of YuNet detection and SFace feature extraction.
-- Extreme head pose angles (yaw or pitch $> 45^\circ$) or partial facial occlusion (heavy sunglasses, masks) can reduce similarity scores below the 90% threshold.
+- Extreme head pose angles (yaw or pitch $> 45^\circ$) or partial facial occlusion (heavy sunglasses, masks) can reduce similarity scores below the configured acceptance threshold.
 
 ### 6. Single Primary Face Selection
 - If an uploaded photo contains multiple people (e.g., group photo), the pipeline automatically selects the **single primary face** with the highest detection confidence score. Multi-subject batch identification from a single group photograph is not currently supported.

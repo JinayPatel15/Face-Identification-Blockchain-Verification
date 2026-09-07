@@ -540,7 +540,7 @@ class TestPipelineOrchestration(unittest.TestCase):
         self.assertFalse(res["blockchain"]["attempted"])
         self.assertEqual(res["blockchain"]["status"], "NOT APPLICABLE")
         self.assertEqual(res["verification"]["status"], "NOT APPLICABLE")
-        self.assertEqual(res["verification"]["verdict"], "NO MATCH FOUND")
+        self.assertEqual(res["verification"]["verdict"], "NO SEARCH RESULTS FOUND")
         self.assertFalse(res["verification"]["verified"])
         mock_client.store_evidence.assert_not_called()
         mock_client.verify_evidence.assert_not_called()
@@ -556,9 +556,87 @@ class TestPipelineOrchestration(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         output_str = captured_out.getvalue()
-        self.assertIn("NO MATCHING WEB CONTENT FOUND", output_str)
-        self.assertIn("FINAL RESULT: NO MATCH FOUND", output_str)
+        self.assertIn("NO SEARCH RESULTS FOUND", output_str)
+        self.assertIn("FINAL RESULT: NO SEARCH RESULTS FOUND", output_str)
         mock_client.store_evidence.assert_not_called()
+
+    @patch("app.pipeline.CandidateFaceMatcher")
+    @patch("app.pipeline.FaceProcessor")
+    @patch("app.pipeline.prepare_search_image")
+    @patch("app.pipeline.search_image")
+    def test_regression_01b_candidates_found_but_sface_rejects_all(
+        self, mock_pipe_search, mock_pipe_prep, mock_pipe_proc_cls, mock_pipe_matcher_cls
+    ):
+        """Test Case B: Search returns candidate results, but SFace rejects all candidates (<90%).
+        Should result in NO MATCH FOUND with 0 blockchain interaction.
+        """
+        cand = NormalizedSearchResult(
+            title="Visual Match",
+            url="https://example.com/photo.jpg",
+            source="Web Site",
+            snippet="Visual match photo",
+            thumbnail="https://example.com/thumb.jpg",
+            result_type="visual_match",
+            platform="Web",
+        )
+        cand_summary = SearchSummary(
+            timestamp="2026-09-07T12:00:00Z",
+            input_image_path=str(self.dummy_image_path),
+            search_input_path=str(self.dummy_image_path),
+            search_service="SerpApi Google Lens",
+            image_id="dummy_img_id",
+            exact_matches_count=0,
+            visual_matches_count=1,
+            related_content_count=0,
+            total_results_count=1,
+            results=[cand],
+            google_lens_matches_count=1,
+            social_fallback_matches_count=0,
+            platform_counts={"Web": 1},
+        )
+
+        mock_proc = MagicMock()
+        mock_proc.load_image.return_value = np.zeros((100, 100, 3), dtype=np.uint8)
+        mock_proc.detect_faces.return_value = [self.sample_detected_face]
+        mock_proc.select_primary_face.return_value = (0, self.sample_detected_face)
+        mock_proc.extract_embedding.return_value = (
+            np.zeros((1, 128), dtype=np.float32),
+            np.zeros((112, 112, 3), dtype=np.uint8),
+        )
+        mock_proc.crop_face.return_value = np.zeros((50, 50, 3), dtype=np.uint8)
+        mock_pipe_proc_cls.return_value = mock_proc
+
+        mock_pipe_search.return_value = cand_summary
+
+        mock_matcher = MagicMock()
+        rejected_match = CandidateMatch(
+            result=cand,
+            similarity=0.45,
+            similarity_percent=45.0,
+            is_match=False,
+            face_detected=True,
+            status="REJECTED",
+            platform="Web",
+        )
+        mock_matcher.verify_candidates.return_value = ([], [rejected_match])
+        mock_pipe_matcher_cls.return_value = mock_matcher
+
+        mock_client = MagicMock()
+
+        res = execute_pipeline(
+            input_path=self.dummy_image_path,
+            output_dir=self.temp_path,
+            blockchain_client=mock_client,
+        )
+
+        self.assertTrue(res["success"])
+        self.assertFalse(res["search"]["match_found"])
+        self.assertEqual(res["search"]["candidates_retrieved"], 1)
+        self.assertEqual(res["search"]["actual_match_count"], 0)
+        self.assertEqual(res["verification"]["verdict"], "NO MATCH FOUND")
+        self.assertFalse(res["verification"]["verified"])
+        mock_client.store_evidence.assert_not_called()
+        mock_client.verify_evidence.assert_not_called()
 
     @patch("app.pipeline.CandidateFaceMatcher")
     @patch("app.pipeline.FaceProcessor")

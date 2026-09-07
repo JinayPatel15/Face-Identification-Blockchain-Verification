@@ -11,16 +11,20 @@ Workflow:
 from __future__ import annotations
 
 import copy
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 import json
+import logging
 import os
 from pathlib import Path
+import re
 from typing import Any, Dict, List, Optional, Tuple
 
 import cv2
 from dotenv import load_dotenv
 import requests
+
+logger = logging.getLogger("reverse_image_search")
 
 SERPAPI_IMAGE_UPLOAD_URL = "https://serpapi.com/image"
 SERPAPI_SEARCH_URL = "https://serpapi.com/search.json"
@@ -51,6 +55,54 @@ class NoSearchResultsError(SearchError):
     """Raised when no matching results are found."""
 
 
+def detect_platform(url: str, source: str = "") -> str:
+    """Detect platform from public URL or source name.
+
+    Supported platforms:
+    - instagram.com -> Instagram
+    - linkedin.com -> LinkedIn
+    - facebook.com -> Facebook
+    - x.com -> X
+    - twitter.com -> X/Twitter
+    - youtube.com -> YouTube
+    - other -> Web
+    """
+    u = (url or "").lower()
+    s = (source or "").lower()
+
+    if "instagram.com" in u or "instagram" in s:
+        return "Instagram"
+    if "linkedin.com" in u or "linkedin" in s:
+        return "LinkedIn"
+    if "facebook.com" in u or "fb.com" in u or "fb.watch" in u or "facebook" in s:
+        return "Facebook"
+    if "x.com" in u:
+        return "X"
+    if "twitter.com" in u or "twitter" in s:
+        return "X/Twitter"
+    if "youtube.com" in u or "youtu.be" in u or "youtube" in s:
+        return "YouTube"
+
+    return "Web"
+
+
+def normalize_url_key(url: str) -> str:
+    """Normalize URL to prevent duplicate candidates."""
+    if not url:
+        return ""
+    u = url.strip()
+    if "#" in u:
+        u = u.split("#", 1)[0]
+    if "?" in u:
+        base, query = u.split("?", 1)
+        params = [
+            p for p in query.split("&")
+            if not p.lower().startswith(("utm_", "igsh=", "fbclid=", "ref=", "source="))
+        ]
+        u = f"{base}?{'&'.join(params)}" if params else base
+    return u.rstrip("/").lower()
+
+
 @dataclass(frozen=True)
 class NormalizedSearchResult:
     """Standardized representation of a web / reverse-image match."""
@@ -60,9 +112,11 @@ class NormalizedSearchResult:
     source: str
     snippet: str
     thumbnail: str
-    result_type: str  # "exact_match" | "visual_match" | "related_content"
+    result_type: str  # "exact_match" | "visual_match" | "related_content" | "knowledge_graph" | "social_fallback"
+    platform: str = "Web"
+    image_url: str = ""
 
-    def to_dict(self) -> Dict[str, str]:
+    def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
 
 
@@ -80,6 +134,9 @@ class SearchSummary:
     related_content_count: int
     total_results_count: int
     results: List[NormalizedSearchResult]
+    google_lens_matches_count: int = 0
+    social_fallback_matches_count: int = 0
+    platform_counts: Dict[str, int] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -92,6 +149,9 @@ class SearchSummary:
             "visual_matches_count": self.visual_matches_count,
             "related_content_count": self.related_content_count,
             "total_results_count": self.total_results_count,
+            "google_lens_matches_count": self.google_lens_matches_count,
+            "social_fallback_matches_count": self.social_fallback_matches_count,
+            "platform_counts": self.platform_counts,
             "results": [res.to_dict() for res in self.results],
         }
 
@@ -304,10 +364,12 @@ def query_google_lens(
 def normalize_google_lens_results(raw_response: Dict[str, Any]) -> List[NormalizedSearchResult]:
     """Normalize Google Lens JSON response into structured search results.
 
-    Categorizes items into:
-    - EXACT MATCH (from 'exact_matches')
-    - VISUAL MATCH (from 'visual_matches')
-    - RELATED CONTENT (from 'related_content')
+    Categorizes items from:
+    - exact_matches
+    - visual_matches
+    - related_content
+    - knowledge_graph
+    - reverse_image_search
 
     Preserves public web sources and URLs without hardcoding or fabrication.
     """
@@ -322,25 +384,37 @@ def normalize_google_lens_results(raw_response: Dict[str, Any]) -> List[Normaliz
         url = str(item.get("link") or item.get("url") or "").strip()
         source = str(item.get("source") or item.get("displayed_link") or "").strip()
         snippet = str(item.get("snippet") or item.get("description") or "").strip()
-        thumbnail = str(item.get("thumbnail") or item.get("image") or "").strip()
+        thumbnail = str(item.get("thumbnail") or "").strip()
+        image_url = str(item.get("image") or "").strip()
+
+        # Fallback between thumbnail and image URL
+        if not thumbnail and image_url:
+            thumbnail = image_url
+        if not image_url and thumbnail:
+            image_url = thumbnail
 
         # Must have at least a title or URL to be meaningful
         if not title and not url:
             return None
 
         # Deduplicate identical target URLs
-        if url and url in seen_urls:
+        url_key = normalize_url_key(url)
+        if url_key and url_key in seen_urls:
             return None
-        if url:
-            seen_urls.add(url)
+        if url_key:
+            seen_urls.add(url_key)
+
+        platform = detect_platform(url, source)
 
         return NormalizedSearchResult(
             title=title or "Untitled Match",
             url=url,
-            source=source or "Web",
+            source=source or platform or "Web",
             snippet=snippet,
             thumbnail=thumbnail,
             result_type=match_type,
+            platform=platform,
+            image_url=image_url,
         )
 
     # 1. Exact Matches (Highest fidelity)
@@ -367,7 +441,224 @@ def normalize_google_lens_results(raw_response: Dict[str, Any]) -> List[Normaliz
             if res:
                 normalized.append(res)
 
+    # 4. Knowledge Graph (Entity/profile overview)
+    kg = raw_response.get("knowledge_graph")
+    if isinstance(kg, dict):
+        kg_items = [kg]
+    elif isinstance(kg, list):
+        kg_items = kg
+    else:
+        kg_items = []
+
+    for entry in kg_items:
+        if isinstance(entry, dict):
+            link = entry.get("link") or entry.get("source_link") or entry.get("website") or ""
+            title = entry.get("title") or entry.get("name") or ""
+            thumb = entry.get("image") or entry.get("thumbnail") or ""
+            if link or title:
+                item_dict = {
+                    "title": title,
+                    "link": link,
+                    "source": entry.get("type") or entry.get("source") or "Knowledge Graph",
+                    "snippet": entry.get("description") or "",
+                    "thumbnail": thumb,
+                    "image": thumb,
+                }
+                res = _extract_item(item_dict, "knowledge_graph")
+                if res:
+                    normalized.append(res)
+
+    # 5. Reverse Image Search link if present
+    rev_section = raw_response.get("reverse_image_search")
+    if isinstance(rev_section, dict):
+        rev_link = rev_section.get("link")
+        if rev_link:
+            res = _extract_item(
+                {
+                    "title": rev_section.get("title", "Google Reverse Image Search"),
+                    "link": rev_link,
+                    "source": "Google Reverse Search",
+                    "snippet": rev_section.get("snippet", ""),
+                    "thumbnail": rev_section.get("thumbnail", ""),
+                },
+                "reverse_image_search",
+            )
+            if res:
+                normalized.append(res)
+
     return normalized
+
+
+def extract_social_query_terms(
+    candidates: Union[List[NormalizedSearchResult], Dict[str, Any]],
+    raw_response: Optional[Dict[str, Any]] = None,
+) -> Optional[str]:
+    """Extract candidate entity names or keywords from Google Lens results for social search fallback."""
+    raw = raw_response
+    cand_list = candidates
+    if isinstance(candidates, dict):
+        raw = candidates
+        cand_list = []
+
+    # Check knowledge_graph first
+    if raw and isinstance(raw.get("knowledge_graph"), dict):
+        kg = raw["knowledge_graph"]
+        kg_title = kg.get("title") or kg.get("name")
+        if kg_title and isinstance(kg_title, str) and len(kg_title.strip()) > 1:
+            return kg_title.strip()
+
+    # If raw response has visual matches, inspect them too
+    titles_to_check: List[str] = []
+    if isinstance(cand_list, list):
+        for c in cand_list[:10]:
+            if hasattr(c, "title"):
+                titles_to_check.append(c.title)
+
+    if not titles_to_check and raw and isinstance(raw.get("visual_matches"), list):
+        for vm in raw["visual_matches"][:10]:
+            if isinstance(vm, dict) and vm.get("title"):
+                titles_to_check.append(str(vm["title"]))
+
+    # Look through titles for identifiable entity names
+    for t in titles_to_check:
+        t = t.strip()
+        if not t or t == "Untitled Match":
+            continue
+        # Split out separators
+        primary = re.split(r"[-|•:–—(\[]", t)[0].strip()
+        # Clean common filler
+        clean = re.sub(
+            r"\b(before and after|photos?|images?|pictures?|wallpaper|instagram|facebook|linkedin|news|wiki|biography|age)\b",
+            "",
+            primary,
+            flags=re.IGNORECASE,
+        ).strip()
+        words = clean.split()
+        if 1 <= len(words) <= 5 and all(len(w) > 1 for w in words):
+            return clean
+
+    return None
+
+
+def search_public_social_fallback(
+    query_terms: str,
+    api_key: str,
+    platforms: Optional[List[str]] = None,
+    search_url: str = SERPAPI_SEARCH_URL,
+    timeout: int = 30,
+) -> List[NormalizedSearchResult]:
+    """Execute public social-media fallback search via SerpApi Google Search engine.
+
+    Discovers publicly indexed content from:
+    - Instagram: site:instagram.com
+    - LinkedIn: site:linkedin.com
+    - Facebook: site:facebook.com
+    - X/Twitter: site:x.com OR site:twitter.com
+    - YouTube: site:youtube.com
+
+    Args:
+        query_terms: Name or keywords extracted from target / Google Lens.
+        api_key: SerpApi API key.
+        platforms: Optional subset of platforms to query.
+        search_url: SerpApi search endpoint.
+        timeout: HTTP timeout in seconds.
+
+    Returns:
+        List of NormalizedSearchResult with result_type="social_fallback".
+    """
+    clean_terms = query_terms.strip().strip('"')
+    if not clean_terms:
+        return []
+
+    # Construct targeted multi-platform site search query
+    site_queries = [
+        "site:instagram.com",
+        "site:linkedin.com",
+        "site:facebook.com",
+        "site:x.com",
+        "site:twitter.com",
+        "site:youtube.com",
+    ]
+    sites_or = " OR ".join(site_queries)
+    combined_query = f'"{clean_terms}" ({sites_or})'
+
+    params = {
+        "engine": "google",
+        "q": combined_query,
+        "api_key": api_key,
+        "num": 10,
+    }
+
+    try:
+        resp = requests.get(search_url, params=params, timeout=timeout)
+    except Exception as exc:
+        logger.warning(f"Public social search fallback query failed: {exc}")
+        return []
+
+    if not resp.ok:
+        logger.warning(f"Public social fallback returned HTTP {resp.status_code}")
+        return []
+
+    try:
+        data = resp.json()
+    except Exception:
+        return []
+
+    organic = data.get("organic_results", [])
+    results: List[NormalizedSearchResult] = []
+
+    for item in organic:
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title", "")).strip()
+        link = str(item.get("link", "")).strip()
+        snippet = str(item.get("snippet", "")).strip()
+        source = str(item.get("source") or item.get("displayed_link") or "").strip()
+
+        # Extract thumbnail if available from search snippet
+        thumbnail = ""
+        if item.get("thumbnail"):
+            thumbnail = str(item["thumbnail"])
+        elif isinstance(item.get("pagemap"), dict):
+            cse_imgs = item["pagemap"].get("cse_image", [])
+            if isinstance(cse_imgs, list) and cse_imgs and isinstance(cse_imgs[0], dict):
+                thumbnail = str(cse_imgs[0].get("src", ""))
+
+        if not title and not link:
+            continue
+
+        platform = detect_platform(link, source)
+
+        results.append(
+            NormalizedSearchResult(
+                title=title or f"Public {platform} Result",
+                url=link,
+                source=source or platform,
+                snippet=snippet,
+                thumbnail=thumbnail,
+                result_type="social_fallback",
+                platform=platform,
+                image_url=thumbnail,
+            )
+        )
+
+    return results
+
+
+def deduplicate_candidates(candidates: List[NormalizedSearchResult]) -> List[NormalizedSearchResult]:
+    """Deduplicate candidate search results by normalized URL preserving insertion order."""
+    seen_urls: set[str] = set()
+    deduped: List[NormalizedSearchResult] = []
+
+    for c in candidates:
+        key = normalize_url_key(c.url)
+        if key and key in seen_urls:
+            continue
+        if key:
+            seen_urls.add(key)
+        deduped.append(c)
+
+    return deduped
 
 
 def sanitize_raw_response(raw_response: Dict[str, Any]) -> Dict[str, Any]:
@@ -420,8 +711,15 @@ def search_image(
     output_search_input_path: str | Path = "output/search_input.jpg",
     raw_debug_path: Optional[str | Path] = "output/raw_search_response.json",
     prepare_crop: bool = True,
+    enable_social_fallback: bool = True,
 ) -> SearchSummary:
-    """Full reverse-image search pipeline using SerpApi Google Lens.
+    """Full reverse-image and public social-media search pipeline using SerpApi.
+
+    1. Executes Google Lens reverse-image search via SerpApi.
+    2. Parses exact matches, visual matches, related content, and knowledge graph.
+    3. Detects public platforms (Instagram, LinkedIn, Facebook, X, YouTube, Web).
+    4. If social candidates are limited, triggers fallback public social discovery.
+    5. Deduplicates candidates and outputs structured search results.
 
     Args:
         input_image_path: Source face image or face crop (e.g. output/selected_face.jpg).
@@ -430,15 +728,10 @@ def search_image(
         output_search_input_path: Path to save prepared search input image.
         raw_debug_path: Optional path to save sanitized raw API response.
         prepare_crop: Whether to upscale small face crops for search clarity.
+        enable_social_fallback: Whether to trigger secondary social-media discovery.
 
     Returns:
         Structured SearchSummary with normalized results.
-
-    Raises:
-        SearchConfigError: If SERPAPI_API_KEY is missing.
-        ImageValidationError: If input image is missing or invalid.
-        SearchUploadError: If upload fails.
-        SearchQueryError: If Google Lens query fails.
     """
     key = api_key or get_api_key()
     if not key:
@@ -460,27 +753,77 @@ def search_image(
     # Step 2: Query Google Lens with image_id
     raw_response = query_google_lens(image_id=image_id, api_key=key)
 
-    # Step 3: Normalize results
-    normalized = normalize_google_lens_results(raw_response)
+    # Step 3: Normalize Google Lens results
+    lens_results = normalize_google_lens_results(raw_response)
+    lens_count = len(lens_results)
 
-    exact_count = sum(1 for r in normalized if r.result_type == "exact_match")
-    visual_count = sum(1 for r in normalized if r.result_type == "visual_match")
-    related_count = sum(1 for r in normalized if r.result_type == "related_content")
+    # Step 4: Fallback Public Social-Media Search (if applicable)
+    social_fallback_results: List[NormalizedSearchResult] = []
+    social_lens_count = sum(
+        1 for r in lens_results if r.platform in ("Instagram", "LinkedIn", "Facebook", "X", "X/Twitter", "YouTube")
+    )
+
+    if enable_social_fallback and social_lens_count < 5:
+        query_terms = extract_social_query_terms(lens_results, raw_response)
+        if query_terms:
+            social_fallback_results = search_public_social_fallback(
+                query_terms=query_terms,
+                api_key=key,
+            )
+
+    # Combine and deduplicate
+    combined = deduplicate_candidates(lens_results + social_fallback_results)
+
+    # Counts by section and platform
+    exact_count = sum(1 for r in combined if r.result_type == "exact_match")
+    visual_count = sum(1 for r in combined if r.result_type == "visual_match")
+    related_count = sum(1 for r in combined if r.result_type == "related_content")
+    fallback_count = sum(1 for r in combined if r.result_type == "social_fallback")
+
+    platform_counts: Dict[str, int] = {}
+    for r in combined:
+        platform_counts[r.platform] = platform_counts.get(r.platform, 0) + 1
+
+    instagram_count = platform_counts.get("Instagram", 0)
+    linkedin_count = platform_counts.get("LinkedIn", 0)
+    facebook_count = platform_counts.get("Facebook", 0)
+    x_count = platform_counts.get("X", 0) + platform_counts.get("X/Twitter", 0)
+    youtube_count = platform_counts.get("YouTube", 0)
+    other_social_count = facebook_count + x_count + youtube_count
+    candidate_images_found = sum(1 for r in combined if bool(r.thumbnail or r.image_url))
+
+    # Safe Diagnostic Logging
+    print("\n--- [SEARCH DIAGNOSTIC LOG] ---")
+    print("SerpApi Request Status: SUCCESS (HTTP 200)")
+    print(f"Total Candidates Retrieved: {len(combined)}")
+    print(f"  - Google Lens Visual Matches: {visual_count}")
+    print(f"  - Google Lens Exact Matches: {exact_count}")
+    print(f"  - Related Content: {related_count}")
+    print(f"  - Social Fallback Candidates: {fallback_count}")
+    print(f"Platform Breakdown:")
+    print(f"  - Instagram URLs Found: {instagram_count}")
+    print(f"  - LinkedIn URLs Found: {linkedin_count}")
+    print(f"  - Other Social URLs Found: {other_social_count} (Facebook: {facebook_count}, X: {x_count}, YouTube: {youtube_count})")
+    print(f"  - Candidate Image URLs Found: {candidate_images_found}")
+    print("--------------------------------\n")
 
     summary = SearchSummary(
         timestamp=datetime.now(timezone.utc).isoformat(),
         input_image_path=str(src_path),
         search_input_path=str(search_img_path),
-        search_service="SerpApi Google Lens",
+        search_service="SerpApi Google Lens & Public Social Search",
         image_id=image_id,
         exact_matches_count=exact_count,
         visual_matches_count=visual_count,
         related_content_count=related_count,
-        total_results_count=len(normalized),
-        results=normalized,
+        total_results_count=len(combined),
+        results=combined,
+        google_lens_matches_count=lens_count,
+        social_fallback_matches_count=len(social_fallback_results),
+        platform_counts=platform_counts,
     )
 
-    # Step 4: Save outputs
+    # Step 5: Save outputs
     save_search_results(summary, output_results_path)
 
     if raw_debug_path:

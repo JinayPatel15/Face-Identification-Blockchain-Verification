@@ -86,30 +86,46 @@ def load_cached_search_results(results_path: Union[str, Path]) -> SearchSummary:
 
     raw_results = data.get("results", [])
     normalized_list: List[NormalizedSearchResult] = []
+    platform_counts: Dict[str, int] = {}
+
     for r in raw_results:
         if isinstance(r, dict):
+            url = str(r.get("url", ""))
+            source = str(r.get("source", ""))
+            from app.search.reverse_image_search import detect_platform
+            platform = str(r.get("platform") or detect_platform(url, source))
+            platform_counts[platform] = platform_counts.get(platform, 0) + 1
             normalized_list.append(
                 NormalizedSearchResult(
                     title=str(r.get("title", "")),
-                    url=str(r.get("url", "")),
-                    source=str(r.get("source", "")),
+                    url=url,
+                    source=source or platform,
                     snippet=str(r.get("snippet", "")),
                     thumbnail=str(r.get("thumbnail", "")),
                     result_type=str(r.get("result_type", "visual_match")),
+                    platform=platform,
+                    image_url=str(r.get("image_url", r.get("image", ""))),
                 )
             )
+
+    lens_count = int(data.get("google_lens_matches_count", len(normalized_list)))
+    fallback_count = int(data.get("social_fallback_matches_count", 0))
+    cached_platforms = data.get("platform_counts") or platform_counts
 
     return SearchSummary(
         timestamp=str(data.get("timestamp", "")),
         input_image_path=str(data.get("input_image_path", "")),
         search_input_path=str(data.get("search_input_path", "")),
-        search_service=str(data.get("search_service", "SerpApi Google Lens")),
+        search_service=str(data.get("search_service", "SerpApi Google Lens & Public Social Search")),
         image_id=data.get("image_id"),
         exact_matches_count=int(data.get("exact_matches_count", 0)),
         visual_matches_count=int(data.get("visual_matches_count", 0)),
         related_content_count=int(data.get("related_content_count", 0)),
         total_results_count=int(data.get("total_results_count", len(normalized_list))),
         results=normalized_list,
+        google_lens_matches_count=lens_count,
+        social_fallback_matches_count=fallback_count,
+        platform_counts=cached_platforms,
     )
 
 
@@ -302,17 +318,35 @@ def run_pipeline(
         clean_source = cm.result.source.encode("ascii", errors="replace").decode("ascii")
         print(f"        #{idx} [{status_tag}] Similarity: {pct_str} | {clean_source}: {clean_title}")
 
+    if len(search_summary.results) == 0:
+        print("\n      " + "=" * 60)
+        print("      NO SEARCH RESULTS FOUND")
+        print("      Candidates Retrieved: 0")
+        print("      Blockchain verification not performed because search returned 0 candidates.")
+        print("      " + "=" * 60)
+        print("\n" + "=" * 70)
+        print("FINAL RESULT: NO SEARCH RESULTS FOUND")
+        print("=" * 70)
+        print("Candidates Retrieved: 0 | Verified Face Matches: 0")
+        print("Blockchain verification not performed because search returned 0 candidates.")
+        print("=" * 70)
+        return 0
+
     if not match_found:
         print("\n      " + "=" * 60)
         print("      NO MATCHING WEB CONTENT FOUND")
+        print(f"      Candidates Retrieved: {len(search_summary.results)}")
+        print(f"      Verified Face Matches: 0")
+        print(f"      Rejected Candidates: {len(rejected_candidates)}")
         print(f"      0 candidates reached the {similarity_threshold * 100:.1f}% similarity threshold.")
         print("      Blockchain verification not performed because no matching web/social evidence was discovered.")
         print("      " + "=" * 60)
         print("\n" + "=" * 70)
         print("FINAL RESULT: NO MATCH FOUND")
         print("=" * 70)
-        print(f"No matching web/social content reached the {similarity_threshold * 100:.1f}% similarity threshold.")
-        print("Blockchain verification not performed because no matching web/social evidence was discovered.")
+        print(f"Candidates Retrieved: {len(search_summary.results)} | Verified Face Matches: 0 | Rejected: {len(rejected_candidates)}")
+        print(f"No candidate reached the {similarity_threshold * 100:.1f}% facial similarity threshold.")
+        print("Blockchain verification not performed because no candidate was verified as a face match.")
         print("=" * 70)
         return 0
 

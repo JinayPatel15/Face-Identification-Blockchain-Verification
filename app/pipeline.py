@@ -49,6 +49,7 @@ from app.search.reverse_image_search import (
     SearchQueryError,
     SearchSummary,
     SearchUploadError,
+    detect_platform,
     get_api_key,
     prepare_search_image,
     search_image,
@@ -72,30 +73,45 @@ def load_cached_search_results(results_path: Union[str, Path]) -> SearchSummary:
 
     raw_results = data.get("results", [])
     normalized_list: List[NormalizedSearchResult] = []
+    platform_counts: Dict[str, int] = {}
+
     for r in raw_results:
         if isinstance(r, dict):
+            url = str(r.get("url", ""))
+            source = str(r.get("source", ""))
+            platform = str(r.get("platform") or detect_platform(url, source))
+            platform_counts[platform] = platform_counts.get(platform, 0) + 1
             normalized_list.append(
                 NormalizedSearchResult(
                     title=str(r.get("title", "")),
-                    url=str(r.get("url", "")),
-                    source=str(r.get("source", "")),
+                    url=url,
+                    source=source or platform,
                     snippet=str(r.get("snippet", "")),
                     thumbnail=str(r.get("thumbnail", "")),
                     result_type=str(r.get("result_type", "visual_match")),
+                    platform=platform,
+                    image_url=str(r.get("image_url", r.get("image", ""))),
                 )
             )
+
+    lens_count = int(data.get("google_lens_matches_count", len(normalized_list)))
+    fallback_count = int(data.get("social_fallback_matches_count", 0))
+    cached_platforms = data.get("platform_counts") or platform_counts
 
     return SearchSummary(
         timestamp=str(data.get("timestamp", "")),
         input_image_path=str(data.get("input_image_path", "")),
         search_input_path=str(data.get("search_input_path", "")),
-        search_service=str(data.get("search_service", "SerpApi Google Lens")),
+        search_service=str(data.get("search_service", "SerpApi Google Lens & Public Social Search")),
         image_id=data.get("image_id"),
         exact_matches_count=int(data.get("exact_matches_count", 0)),
         visual_matches_count=int(data.get("visual_matches_count", 0)),
         related_content_count=int(data.get("related_content_count", 0)),
         total_results_count=int(data.get("total_results_count", len(normalized_list))),
         results=normalized_list,
+        google_lens_matches_count=lens_count,
+        social_fallback_matches_count=fallback_count,
+        platform_counts=cached_platforms,
     )
 
 
@@ -293,14 +309,58 @@ def execute_pipeline(
         threshold=similarity_threshold,
     )
 
-    actual_match_count = len(accepted_matches)
-    match_found = actual_match_count > 0
+    candidates_retrieved = search_summary.total_results_count
+    verified_face_matches = len(accepted_matches)
+    rejected_candidates_count = len(rejected_candidates)
+    match_found = verified_face_matches > 0
+
+    downloaded_images_count = sum(
+        1 for m in (accepted_matches + rejected_candidates) if getattr(m, "status", "") != "IMAGE_UNAVAILABLE"
+    )
+    faces_detected_count = sum(
+        1 for m in (accepted_matches + rejected_candidates) if getattr(m, "face_detected", False)
+    )
+    sface_compared_count = sum(
+        1 for m in (accepted_matches + rejected_candidates) if getattr(m, "status", "") in ("VERIFIED_FACE_MATCH", "REJECTED")
+    )
+
+    platform_counts = getattr(search_summary, "platform_counts", {})
+    if not platform_counts:
+        platform_counts = {}
+        for r in search_summary.results:
+            p = getattr(r, "platform", "Web")
+            platform_counts[p] = platform_counts.get(p, 0) + 1
+
+    instagram_candidates = platform_counts.get("Instagram", 0)
+    linkedin_candidates = platform_counts.get("LinkedIn", 0)
+    facebook_candidates = platform_counts.get("Facebook", 0)
+    x_candidates = platform_counts.get("X", 0) + platform_counts.get("X/Twitter", 0)
+    youtube_candidates = platform_counts.get("YouTube", 0)
+    other_social_candidates = facebook_candidates + x_candidates + youtube_candidates
+
+    search_status = "NO SEARCH RESULTS FOUND" if candidates_retrieved == 0 else "CANDIDATES RETRIEVED"
 
     search_info = {
         "service": search_summary.search_service,
         "mode": search_mode,
+        "search_status": search_status,
         "match_found": match_found,
-        "actual_match_count": actual_match_count,
+        "actual_match_count": verified_face_matches,
+        "candidates_retrieved": candidates_retrieved,
+        "verified_face_matches": verified_face_matches,
+        "rejected_candidates_count": rejected_candidates_count,
+        "candidate_images_retrieved": downloaded_images_count,
+        "candidate_faces_detected": faces_detected_count,
+        "candidates_compared_with_sface": sface_compared_count,
+        "google_lens_candidates": getattr(search_summary, "google_lens_matches_count", search_summary.visual_matches_count),
+        "social_fallback_candidates": getattr(search_summary, "social_fallback_matches_count", 0),
+        "platform_counts": platform_counts,
+        "instagram_candidates": instagram_candidates,
+        "linkedin_candidates": linkedin_candidates,
+        "facebook_candidates": facebook_candidates,
+        "x_candidates": x_candidates,
+        "youtube_candidates": youtube_candidates,
+        "other_social_candidates": other_social_candidates,
         "similarity_threshold": similarity_threshold,
         "total_results": search_summary.total_results_count,
         "exact_matches": search_summary.exact_matches_count,
@@ -314,10 +374,60 @@ def execute_pipeline(
     }
 
     # --------------------------------------------------------------------------
-    # NO MATCH BRANCH: Skip Evidence Hashing & Blockchain Verification
+    # CASE A: NO SEARCH RESULTS FOUND
+    # --------------------------------------------------------------------------
+    if candidates_retrieved == 0:
+        update_progress("No search results returned by search provider; skipping blockchain", 1.0)
+        evidence_info = {
+            "generated": False,
+            "canonical_evidence": None,
+            "sha256": None,
+            "hex_hash": None,
+            "bytes32_hex": None,
+            "payload_size_bytes": 0,
+            "evidence_json_path": None,
+            "hash_txt_path": None,
+        }
+        blockchain_info = {
+            "attempted": False,
+            "status": "NOT APPLICABLE",
+            "network": "Hardhat Local Ethereum",
+            "rpc_url": None,
+            "contract_address": None,
+            "signer_account": None,
+            "already_anchored": False,
+            "transaction_hash": None,
+            "block_number": None,
+            "gas_used": None,
+            "timestamp": 0,
+            "timestamp_utc": "N/A",
+            "on_chain_hash": "",
+            "uploader": "",
+        }
+        verification_info = {
+            "verified": False,
+            "status": "NOT APPLICABLE",
+            "verdict": "NO SEARCH RESULTS FOUND",
+            "computed_hash": None,
+            "on_chain_hash": "",
+            "message": "No search results returned by search provider. Blockchain anchoring not performed.",
+        }
+        return {
+            "success": True,
+            "error": None,
+            "stage_failed": None,
+            "face": face_info,
+            "search": search_info,
+            "evidence": evidence_info,
+            "blockchain": blockchain_info,
+            "verification": verification_info,
+        }
+
+    # --------------------------------------------------------------------------
+    # CASE B: NO MATCH FOUND (Candidates retrieved, but 0 passed SFace >= 90%)
     # --------------------------------------------------------------------------
     if not match_found:
-        update_progress("No candidate reached similarity threshold; skipping blockchain anchoring", 1.0)
+        update_progress(f"{candidates_retrieved} candidates evaluated; none reached {similarity_threshold*100:.0f}% threshold", 1.0)
         evidence_info = {
             "generated": False,
             "canonical_evidence": None,
@@ -351,8 +461,8 @@ def execute_pipeline(
             "computed_hash": None,
             "on_chain_hash": "",
             "message": (
-                f"Blockchain verification not performed because 0 candidates reached the "
-                f"{similarity_threshold * 100:.0f}% face similarity threshold."
+                f"Blockchain verification not performed because 0 of {candidates_retrieved} candidates "
+                f"reached the {similarity_threshold * 100:.0f}% face similarity threshold."
             ),
         }
         return {
