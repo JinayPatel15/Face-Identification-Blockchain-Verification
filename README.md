@@ -1,346 +1,589 @@
 # Face Identification & Blockchain Verification
 
-> **Status:** ✅ Verified through Phase 6 (Face processing, genuine reverse-image search, deterministic evidence hashing, EvidenceRegistry smart contract, and end-to-end blockchain verification pipeline).
+[![Python](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
+[![Solidity](https://img.shields.io/badge/Solidity-0.8.28-363636.svg)](https://soliditylang.org/)
+[![Hardhat](https://img.shields.io/badge/Hardhat-Ethereum-yellow.svg)](https://hardhat.org/)
+[![OpenCV](https://img.shields.io/badge/OpenCV-YuNet%20%7C%20SFace-5C3EE8.svg)](https://opencv.org/)
+[![Streamlit](https://img.shields.io/badge/Streamlit-Interactive%20UI-FF4B4B.svg)](https://streamlit.io/)
+[![Tests](https://img.shields.io/badge/Tests-76%20Passing-brightgreen.svg)]()
+
+> An end-to-end pipeline that takes a face scan as input, searches the web/social media for candidate content using reverse-image search, performs **SFace facial recognition verification ($\ge 90\%$)** to accept genuine matches and reject false positives, and cryptographically anchors and audits the discovered data on an **Ethereum smart contract**.
 
 ---
 
-## Short Description
+## Table of Contents
 
-**Face Identification & Blockchain Verification** is a command-line pipeline designed to detect human faces from input images, extract facial embeddings, perform dynamic web/reverse-image searches to find public identity evidence, hash the evidence, and record/verify the cryptographic proof on a local Ethereum blockchain using a Solidity smart contract.
+1. [What the Project Does](#1-what-the-project-does)
+   - [Core Concept & Pipeline Stages](#core-concept--pipeline-stages)
+   - [Separation of Search vs. Blockchain Verification](#separation-of-search-vs-blockchain-verification)
+   - [Strict Audit Verdicts](#strict-audit-verdicts)
+   - [System Architecture Diagram](#system-architecture-diagram)
+   - [Project Directory Structure](#project-directory-structure)
+2. [Which Blockchain is Used](#2-which-blockchain-is-used)
+   - [Network Architecture: Local Ethereum (Hardhat Network)](#network-architecture-local-ethereum-hardhat-network)
+   - [Why This Blockchain?](#why-this-blockchain)
+   - [Smart Contract: EvidenceRegistry.sol](#smart-contract-evidenceregistrysol)
+   - [Cryptographic Hash Anchoring vs. Raw Data Storage](#cryptographic-hash-anchoring-vs-raw-data-storage)
+3. [How to Run It](#3-how-to-run-it)
+   - [Prerequisites](#prerequisites)
+   - [Installation & Setup](#installation--setup)
+   - [Environment Configuration (.env)](#environment-configuration-env)
+   - [Starting the Local Blockchain & Deploying Contract](#starting-the-local-blockchain--deploying-contract)
+   - [Running via Command-Line Interface (CLI)](#running-via-command-line-interface-cli)
+   - [Running via Interactive Web Dashboard (Streamlit)](#running-via-interactive-web-dashboard-streamlit)
+   - [Running the Automated Test Suites](#running-the-automated-test-suites)
+4. [Known Limitations](#4-known-limitations)
+   - [Public Web Indexing Constraints](#1-public-web-indexing-constraints)
+   - [Reverse Search API Quotas & Rate Limits](#2-reverse-search-api-quotas--rate-limits)
+   - [Face Similarity vs. Legal Real-World Identity](#3-face-similarity-vs-legal-real-world-identity)
+   - [Local Blockchain Sandboxed State](#4-local-blockchain-sandboxed-state)
+   - [Image Quality, Lighting & Extreme Head Poses](#5-image-quality-lighting--extreme-head-poses)
+   - [Single Primary Face Selection](#6-single-primary-face-selection)
+5. [Security & Privacy Guarantees](#5-security--privacy-guarantees)
+6. [License](#6-license)
 
 ---
 
-## Project Objective
+## 1. What the Project Does
 
-The objective is to establish an end-to-end verifiable audit trail linking facial biometrics and public web evidence to an immutable local blockchain ledger:
-
-1. **Input Face Image:** Receive a source facial image.
-2. **Face Detection:** Detect faces using OpenCV YuNet.
-3. **Face Encoding / Feature Extraction:** Extract high-dimensional facial embeddings using SFace.
-4. **Genuine Reverse-Image / Web Search:** Dynamically query public search engines (e.g., SerpApi) without hardcoding results.
-5. **Find Matching Web / Social Content:** Discover relevant public web resources and identity markers.
-6. **Extract Evidence Information:** Compile discovered identity metadata.
-7. **Create Cryptographic Hash:** Generate a deterministic cryptographic digest (e.g., SHA-256 / Keccak-256) of the evidence.
-8. **Store Hash on Blockchain:** Anchor the hash via a real Solidity smart contract deployed on a local Ethereum node.
-9. **Retrieve Blockchain Record:** Query the smart contract to fetch the stored record.
-10. **Verify Discovered Data:** Validate integrity against the blockchain record to output an authoritative **PASS / FAIL**.
-
----
-
-## High-Level Architecture
+### Core Concept & Pipeline Stages
+The system establishes a verifiable, tamper-proof audit trail linking a source face image to public web occurrences discovered via reverse image search. It operates across 6 programmatic stages:
 
 ```
-[ Input Face Image ]
-         │
-         ▼
-[ Face Detection (OpenCV YuNet) ]
-         │
-         ▼
-[ Face Encoding (OpenCV SFace) ]
-         │
-         ▼
-[ Dynamic Web / Reverse-Image Search API ]
-         │
-         ▼
-[ Evidence Extraction & Structuring ]
-         │
-         ▼
-[ Cryptographic Hashing ]
-         │
-         ▼
-[ Solidity Smart Contract (Hardhat / Local Ethereum Node) ]
-         │
-         ▼
-[ Retrieval & On-Chain Verification ]
-         │
-         ▼
-   [ PASS / FAIL ]
+[ Face Scan Input ] ➔ [ 1. YuNet Face Detection ] ➔ [ 2. SFace Embedding Extraction ]
+                             │
+                             ▼
+                 [ 3. Google Lens Reverse Search ]
+                             │
+                             ▼
+            [ 4. SFace Candidate Verification (Cosine Sim ≥ 90%) ]
+                ├── Sim < 90%  ➔ REJECT (False Positives Filtered Out)
+                └── Sim ≥ 90%  ➔ ACCEPT (Discovered Match Set)
+                             │
+            ┌────────────────┴────────────────┐
+            ▼                                 ▼
+[ 0 Candidates Accepted ]          [ ≥ 1 Candidate Accepted ]
+            │                                 │
+     (Skip Blockchain)                        ▼
+            │                     [ 5. Canonical JSON Structuring ]
+            │                                 │
+            │                     [ Deterministic SHA-256 Digest ]
+            │                                 │
+            │                     [ 6. Hardhat Blockchain Anchoring ]
+            │                                 │
+            ▼                                 ▼
+FINAL RESULT: NO MATCH FOUND       [ On-Chain Proof Verification ]
+                                              ├── Computed == On-Chain ➔ VERIFIED
+                                              └── Computed != On-Chain ➔ TAMPERED
 ```
 
-### Directory Structure
+1. **Face Detection (OpenCV YuNet):** Detects human faces in the input image, identifies 5 facial landmarks (eyes, nose, mouth corners), and crops the primary face.
+2. **Feature Extraction (OpenCV SFace):** Generates a 128-dimensional biometric embedding representing the unique facial geometry of the target face.
+3. **Reverse-Image Web Search (SerpApi Google Lens):** Dispatches the cropped face to public reverse image search engines to identify candidate web pages, social media profiles, and indexed occurrences.
+4. **Candidate Face Matching & Verification (SFace Cosine Similarity):** 
+   - Downloads candidate thumbnails from the web search results.
+   - Detects faces in candidate images and extracts their 128-d SFace embeddings.
+   - Computes cosine similarity against the query face embedding.
+   - Applies a strict default acceptance threshold of **90% (`0.90`)**:
+     - Candidates with similarity $\ge 90\%$ are **accepted** as confirmed matches (even a single accepted match is sufficient).
+     - Candidates with similarity $< 90\%$ are **rejected** as visual false positives.
+5. **Deterministic Evidence Structuring & Hashing:**
+   - Filters out non-matching candidates.
+   - Structures **only accepted matches** into canonical JSON (lexicographically sorted keys, compact UTF-8, zero transient runtime paths).
+   - Computes an immutable 32-byte **SHA-256 cryptographic digest**.
+6. **Smart Contract Anchoring & Verification (`EvidenceRegistry.sol`):**
+   - Transacts with a local Ethereum blockchain to anchor the evidence digest on-chain.
+   - Queries the smart contract to retrieve the registered record (`dataHash`, `timestamp`, `uploader`).
+   - Validates that the off-chain computed digest matches the on-chain ledger record.
 
+---
+
+### Separation of Search vs. Blockchain Verification
+A core architectural feature is the strict separation between **search match detection** and **blockchain evidence verification**:
+- The blockchain smart contract verifies **cryptographic evidence integrity** (whether a specific hash was registered and untouched). It does *not* query the web.
+- The pipeline logic verifies **facial match presence** using SFace before creating evidence.
+- If Google Lens returns visual matches but **none reach $\ge 90\%$ face similarity**, the pipeline halts immediately, outputs `"NO MATCH FOUND"`, and **skips blockchain anchoring entirely**.
+
+---
+
+### Strict Audit Verdicts
+
+| Scenario | Condition | System Verdict |
+| :--- | :--- | :--- |
+| **No Candidate $\ge 90\%$** | 0 candidates reach the 90% facial similarity threshold | `NO MATCH FOUND` |
+| **Match Verified On-Chain** | $\ge 1$ candidate $\ge 90\%$ AND computed SHA-256 matches on-chain record | `VERIFIED` |
+| **Evidence Tampered** | Candidate was anchored, but evidence JSON or on-chain digest was altered | `TAMPERED / VERIFICATION FAILED` |
+
+---
+
+### System Architecture Diagram
+
+```mermaid
+flowchart TD
+    subgraph ClientLayer ["1. Input & Interface"]
+        A["Face Photograph (sample.jpg)"]
+        UI["Streamlit Dashboard (frontend/app.py)"]
+        CLI["Command Line Interface (app/main.py)"]
+    end
+
+    subgraph BiometricLayer ["2. Biometric Processing (OpenCV)"]
+        Y["YuNet Face Detection (ONNX)"]
+        S["SFace Feature Extraction (ONNX)"]
+        EMB["128-d Target Embedding"]
+    end
+
+    subgraph WebSearchLayer ["3. Public Web Search"]
+        LENS["SerpApi Google Lens API"]
+        CACHE["Cached Search Results (search_results.json)"]
+        CAND["Candidate Web Results (URLs, Thumbnails)"]
+    end
+
+    subgraph MatchingLayer ["4. Candidate Verification (face_matcher.py)"]
+        DL["Fetch & Decode Candidate Images"]
+        CFD["Candidate Face Detection (YuNet)"]
+        CSFace["Candidate SFace Embedding Extraction"]
+        COS["Cosine Similarity Evaluation"]
+        THRESH{"Cosine Sim >= 90%?"}
+        REJ["Rejected Candidate (< 90%)"]
+        ACC["Accepted Match (>= 90%)"]
+    end
+
+    subgraph EvidenceLayer ["5. Evidence Hashing (evidence_hasher.py)"]
+        CANON["Canonical JSON (Accepted Matches Only)"]
+        SHA["SHA-256 Hash Digest (32-byte hex)"]
+    end
+
+    subgraph BlockchainLayer ["6. Ethereum Ledger (EvidenceRegistry.sol)"]
+        NODE["Hardhat Local Node (RPC: 8545)"]
+        CONTRACT["EvidenceRegistry Smart Contract"]
+        STORE["storeEvidence(bytes32 dataHash)"]
+        GET["getEvidence(bytes32 dataHash)"]
+        VERIFY["verifyEvidence(bytes32 dataHash)"]
+    end
+
+    subgraph OutputLayer ["7. Final Audit Verdict"]
+        V_NO["FINAL RESULT: NO MATCH FOUND"]
+        V_OK["FINAL RESULT: VERIFIED"]
+        V_FAIL["FINAL RESULT: TAMPERED / VERIFICATION FAILED"]
+    end
+
+    A --> CLI & UI
+    CLI & UI --> Y
+    Y --> S --> EMB
+    Y --> LENS & CACHE --> CAND
+    CAND --> DL --> CFD --> CSFace --> COS --> THRESH
+    EMB --> COS
+    THRESH -- No --> REJ --> V_NO
+    THRESH -- Yes --> ACC --> CANON --> SHA
+    SHA --> STORE --> NODE --> CONTRACT
+    CONTRACT --> GET & VERIFY
+    VERIFY -- "Hash Matches" --> V_OK
+    VERIFY -- "Hash Mismatched" --> V_FAIL
 ```
-Face-Identification-Blockchain-Verification/
-│
-├── app/
-│   ├── __init__.py
-│   ├── main.py                # Application entry point (CLI)
-│   │
-│   ├── face/                  # Face detection & feature extraction
-│   │   └── __init__.py
-│   │
-│   ├── search/                # Web / reverse-image search & evidence gathering
-│   │   └── __init__.py
-│   │
-│   ├── blockchain/            # Web3 provider & contract interaction
-│   │   └── __init__.py
-│   │
-│   └── utils/                 # Shared utilities, hashing, and configuration
-│       └── __init__.py
-│
-├── contracts/                 # Solidity smart contracts
-├── scripts/                   # Deployment and operational scripts
-├── models/                    # Pre-trained ONNX model files (YuNet, SFace)
-├── input/                     # Input images for identification
-├── output/                    # Processing outputs, logs, and artifacts
-├── tests/                     # Unit and integration test suites
-│
-├── .env.example               # Template for environment variables
-├── .gitignore                 # Git ignore rules
-├── requirements.txt           # Python project dependencies
-└── README.md                  # Project documentation
-```
 
 ---
 
-## Smart Contract Architecture
-
-The project employs an on-chain verification model implemented in Solidity (`contracts/EvidenceRegistry.sol`) running on a local Hardhat Ethereum node.
-
-### 1. Hash Anchoring vs. Raw Data Storage
-Blockchains are immutable ledgers with severe storage constraints and public transparency. Storing high-resolution face images or full web search JSON payloads directly on-chain is prohibitively expensive (in gas), inefficient, and introduces severe privacy risks. Instead, the architecture computes a deterministic 32-byte cryptographic digest (`SHA-256` / `Keccak-256`) of the canonical evidence payload off-chain and registers only this compact hash on-chain.
-
-### 2. EvidenceRegistry Smart Contract
-The `EvidenceRegistry` contract acts as a decentralized, tamper-proof notary:
-- **`storeEvidence(bytes32 dataHash)`**: Records a new evidence hash. Reverts if the hash is `bytes32(0)` or has already been registered, guaranteeing uniqueness and immutability.
-- **`getEvidence(bytes32 dataHash)`**: Queries on-chain storage and returns the recorded proof metadata. Reverts if the hash was never registered.
-- **`verifyEvidence(bytes32 dataHash)`**: Evaluates whether an evidence hash exists in the contract and returns a boolean `true` / `false`.
-
-### 3. What Information is Stored On-Chain
-Each evidence entry consists of minimal, auditable metadata:
-- **`bytes32 dataHash`**: The cryptographic hash of the canonical evidence payload.
-- **`uint256 timestamp`**: The block timestamp (`block.timestamp`) recording the exact immutable time of registration.
-- **`address uploader`**: The Ethereum account (`msg.sender`) that anchored the record.
-
-No personal identifiable images, raw web URLs, or API secrets are ever stored on-chain.
-
-### 4. How Verification Works
-1. When identity verification is requested, the application reconstructs the canonical evidence payload and re-hashes it off-chain.
-2. The hash is queried against `verifyEvidence(bytes32)` on the smart contract.
-3. If the on-chain record matches, the contract confirms the record was registered at that specific block timestamp by the authorized uploader without alteration, yielding a definitive **PASS**.
-4. If the hash does not exist or payload contents have changed by even a single byte, the contract returns **FAIL**.
-
-### 5. Local Blockchain Environment
-A local Hardhat Ethereum network (`http://127.0.0.1:8545`) is used for development, testing, and demonstration. This avoids public network gas fees, eliminates the need for real cryptocurrency or external wallets (such as MetaMask), guarantees instantaneous deterministic block mining, and ensures full reproducible auditing in a sandboxed environment.
-
----
-
-## Python ↔ Blockchain Integration
-
-The Python client module (`app/blockchain/blockchain_client.py`) interfaces the Python pipeline with the on-chain `EvidenceRegistry` contract via `web3.py`.
-
-### Architecture & Capabilities
-- **Web3 Provider:** Connects to the local Hardhat JSON-RPC node (`BLOCKCHAIN_RPC_URL=http://127.0.0.1:8545`).
-- **Dynamic ABI Loading:** Reads the contract ABI directly from the compiled Hardhat build artifact (`artifacts/contracts/EvidenceRegistry.sol/EvidenceRegistry.json`), avoiding brittle hardcoded ABIs.
-- **Hash Normalization & Validation:** Validates that incoming evidence digests are exactly 32 bytes (64 hexadecimal characters), rejecting zero hashes (`bytes32(0)`) or malformed strings before transactions are broadcast.
-- **On-Chain Storage (`store_evidence`):** Builds, signs (using a local test private key from `BLOCKCHAIN_PRIVATE_KEY`), and broadcasts transactions to anchor evidence digests.
-- **On-Chain Retrieval (`get_evidence`):** Reads the recorded proof (`data_hash`, `timestamp`, `uploader`) from contract storage without state changes.
-- **On-Chain Verification (`verify_evidence`):** Returns a boolean `True`/`False` confirming if an evidence hash exists on the immutable ledger.
-- **Privacy & Storage Security:** Only 32-byte cryptographic digests and timestamps are stored on-chain. Raw images, search responses, or credentials are never submitted to the blockchain.
-
-### Running the Local Blockchain & Tests
-
-1. **Start the local Hardhat Ethereum node:**
-   ```bash
-   npx hardhat node
-   ```
-
-2. **Deploy the EvidenceRegistry contract locally:**
-   ```bash
-   npx hardhat run scripts/deploy.js --network localhost
-   ```
-
-3. **Configure `.env` with the deployed contract address:**
-   ```env
-   BLOCKCHAIN_RPC_URL=http://127.0.0.1:8545
-   CONTRACT_ADDRESS=0x5FbDB2315678afecb367f032d93F642f64180aa3
-   BLOCKCHAIN_PRIVATE_KEY=<local_hardhat_test_account_private_key>
-   ```
-
-4. **Run the Python blockchain integration runner:**
-   ```bash
-   python app/blockchain/test_blockchain_client.py
-   ```
-
-*(Note: The Python blockchain client is fully integrated into the end-to-end verification pipeline in `app/main.py`).*
-
----
-
-## Technology Stack
-
-- **Application & CLI:** Python 3
-- **Interactive Web UI:** Streamlit (`frontend/app.py`)
-- **Face Processing:** OpenCV, YuNet (face detection), SFace (facial recognition / feature extraction)
-- **Web / Reverse-Image Search:** Genuine Search Engine API (SerpApi / Google Lens API)
-- **Smart Contract Development:** Solidity, Hardhat
-- **Blockchain Network:** Local Ethereum node (Hardhat Network `http://127.0.0.1:8545`)
-- **Blockchain Client Integration:** Python `web3.py`
-
----
-
-## Frontend / UI (Streamlit Web Dashboard)
-
-A dedicated, browser-based web application is provided in `frontend/app.py` built with Streamlit. It connects directly to the backend pipeline to provide an interactive, visual interface for portrait upload, detection inspection, reverse-image match exploration, and on-chain ledger auditing.
-
-### Starting the Web Dashboard
-
-1. **Terminal 1: Start the Local Hardhat Node**
-   ```bash
-   npm run node
-   ```
-   *(Note: Hardhat runs an isolated local Ethereum network on `http://127.0.0.1:8545` for development, gas-free testing, and instant block confirmation).*
-
-2. **Terminal 2: Launch the Streamlit Frontend**
-   ```bash
-   streamlit run frontend/app.py
-   ```
-   *(Or using the project virtual environment: `.venv\Scripts\streamlit.exe run frontend/app.py`)*
-
-3. **Open the Browser**
-   Navigate to `http://localhost:8501` to view the application.
-
-### Using the Frontend Interface
-
-4. **Upload a Face Image:**
-   Drag and drop or select any portrait or photo from your computer (`.jpg`, `.jpeg`, `.png`, `.webp`) in the sidebar, or select the preloaded `input/sample.jpg`.
-5. **Select Search Mode:**
-   - **Cached Search:** Uses pre-existing discovered search results to conserve external search quotas and enable repeatable local demonstrations.
-   - **Live Google Lens Search:** Dispatches a live query to SerpApi Google Lens using your configured `SERPAPI_API_KEY`.
-6. **Execute Verification:**
-   Click the prominent **🚀 Run Verification** button in the sidebar. Real-time progress indicators track execution across all pipeline stages.
-7. **Inspect Face Detection Tab:**
-   View the uploaded image annotated with YuNet's bounding box and five facial landmarks (eyes, nose, mouth corners), the cropped primary face, detection confidence score, and SFace feature vector shape (`128-d float32`).
-8. **Inspect Web Matches Tab:**
-   Explore visual/web occurrences discovered by Google Lens, categorized by match type with domain badges (LinkedIn, GitHub, TheCollector, etc.), snippets, and clickable links.
-9. **Inspect Evidence & SHA-256 Tab:**
-   Review the exact deterministic canonical evidence JSON payload, payload size, copyable 64-character lowercase SHA-256 digest, and Solidity `bytes32` representation.
-10. **Inspect Blockchain Tab:**
-    Audit on-chain contract coordinates, uploader account, transaction hash, block number, gas used, and registration status:
-    - **`NEWLY ANCHORED`:** Fresh evidence hash registered and mined on the local ledger.
-    - **`ALREADY ANCHORED`:** Evidence hash was previously recorded; existing proof is verified without duplicate transaction submission.
-11. **Check Final Verification Verdict:**
-    Examine the prominent **PASS / FAIL** card confirming that the off-chain computed evidence digest matches the immutable on-chain record. You can upload another image and repeat the workflow at any time.
-
-### Architectural Guarantees & Identity Disclaimer
-- **Local Blockchain:** The smart contract runs strictly on a local sandboxed Hardhat Ethereum node (`31337`). No public cryptocurrency or MetaMask wallets are required.
-- **Evidence Integrity Only:** Blockchain anchoring verifies that the canonical evidence payload existed in that exact state at or before the recorded block timestamp and has not been altered.
-- **Identity Disclaimer:** **Matching visual/web content discovered by Google Lens does NOT independently prove or confirm a person's real-world identity.** The application neither infers nor confirms identity; it strictly verifies public web evidence and cryptographic ledger integrity.
-
----
-
-## End-to-End Pipeline (CLI)
-
-The complete verification workflow can also be executed via the CLI in `app/main.py`:
-
-### Pipeline Workflow
+### Project Directory Structure
 
 ```text
-Face Image
-    ↓ [1/6] Face Detection (YuNet ONNX)
-Face Detection / Selection
-    ↓ [2/6] Face Selection (Highest Confidence) & Crop Preparation
-Reverse-Image Search
-    ↓ [3/6] Google Lens Search (SerpApi - Live or Cached)
-Normalized Search Evidence
-    ↓ [4/6] Deterministic Canonicalization & SHA-256 Hashing
-Canonical Evidence & SHA-256 Digest
-    ↓ [5/6] EvidenceRegistry.storeEvidence() on Local Ethereum Node
-Blockchain Verification
-    ↓ [6/6] Independent On-Chain Proof Audit (verifyEvidence / getEvidence)
-Audit Verdict: PASS / FAIL
+Face-Identification-Blockchain-Verification/
+├── app/
+│   ├── __init__.py
+│   ├── main.py                     # CLI entrypoint with argument parsing and logging
+│   ├── pipeline.py                 # Core 6-stage orchestration pipeline
+│   ├── blockchain/
+│   │   ├── __init__.py
+│   │   └── blockchain_client.py    # Web3.py client for EvidenceRegistry contract
+│   ├── face/
+│   │   ├── __init__.py
+│   │   ├── face_processor.py       # YuNet detection & SFace feature extraction
+│   │   └── face_matcher.py         # Candidate image verification & 90% threshold filtering
+│   ├── search/
+│   │   ├── __init__.py
+│   │   └── reverse_image_search.py # SerpApi Google Lens client & payload normalizer
+│   └── utils/
+│       ├── __init__.py
+│       └── evidence_hasher.py      # Deterministic JSON canonicalizer & SHA-256 hasher
+├── contracts/
+│   └── EvidenceRegistry.sol        # Solidity smart contract for hash anchoring
+├── frontend/
+│   └── app.py                      # Interactive Streamlit web dashboard
+├── models/
+│   ├── face_detection_yunet.onnx   # OpenCV YuNet face detection model
+│   └── face_recognition_sface.onnx # OpenCV SFace face recognition model
+├── scripts/
+│   └── deploy.js                   # Hardhat deployment script for EvidenceRegistry
+├── tests/
+│   ├── test_face_processor.py      # YuNet & SFace unit tests
+│   ├── test_face_matcher.py        # Candidate matching & threshold verification tests
+│   ├── test_reverse_search.py      # Search normalization & error handling tests
+│   ├── test_evidence_hasher.py     # Deterministic canonicalization & SHA-256 tests
+│   ├── test_blockchain_client.py   # Web3 client interaction tests
+│   ├── test_pipeline.py            # End-to-end pipeline & regression tests
+│   └── test_frontend.py            # Streamlit app component tests
+├── input/
+│   └── sample.jpg                  # Reference test face photograph
+├── output/                         # Generated artifacts (crops, canonical JSON, digests)
+├── .env.example                    # Template for environment configuration
+├── hardhat.config.js               # Hardhat network & Solidity compiler config
+├── package.json                    # Node.js dependencies & npm scripts
+├── requirements.txt                # Python dependencies
+└── README.md                       # Complete project documentation
 ```
 
-### 1. Prerequisites
-- Python 3.10+ with project dependencies installed (`pip install -r requirements.txt`).
-- Node.js and npm with Hardhat dependencies installed (`npm install`).
-- Models installed: `models/face_detection_yunet.onnx` and `models/face_recognition_sface.onnx`.
+---
 
-### 2. Starting the Local Hardhat Node
-Launch the local Ethereum JSON-RPC test node:
+## 2. Which Blockchain is Used
+
+### Network Architecture: Local Ethereum (Hardhat Network)
+
+This project runs on a **Local Ethereum Blockchain Network** powered by **Hardhat**:
+- **Protocol:** Ethereum Virtual Machine (EVM)
+- **Node Implementation:** Hardhat Network JSON-RPC Node
+- **RPC Endpoint:** `http://127.0.0.1:8545`
+- **Chain ID:** `31337`
+- **Smart Contract Language:** Solidity (`^0.8.28`)
+- **Python Integration Library:** `web3.py` (v7.x)
+
+---
+
+### Why This Blockchain?
+
+1. **Zero Financial Cost (Gas-Free Development):** Running on a local Hardhat network eliminates the requirement for real cryptocurrency or testnet faucet tokens, enabling free, unlimited transaction execution for academic and enterprise evaluation.
+2. **Deterministic, Instant Block Confirmation:** Hardhat mines blocks instantaneously upon transaction submission (`automine: true`). This removes the 12–60 second latency common on public testnets (e.g., Sepolia) and ensures fast, deterministic testing.
+3. **Reproducible Sandboxed Environment:** The local network provides 20 pre-funded test accounts with known private keys, making the setup completely self-contained and reproducible across developer machines without external wallet plugins (e.g., MetaMask).
+4. **Full EVM Compatibility:** The Solidity smart contract (`EvidenceRegistry.sol`) is compiled using the standard EVM toolchain. It can be deployed directly to Ethereum Mainnet, Polygon, Arbitrum, or Optimism without modifying a single line of Solidity code.
+
+---
+
+### Smart Contract: `EvidenceRegistry.sol`
+
+The `EvidenceRegistry` contract acts as an immutable, decentralized notary ledger:
+
+```solidity
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.28;
+
+contract EvidenceRegistry {
+    struct Evidence {
+        bytes32 dataHash;
+        uint256 timestamp;
+        address uploader;
+    }
+
+    mapping(bytes32 => Evidence) private registry;
+
+    event EvidenceStored(bytes32 indexed dataHash, uint256 timestamp, address indexed uploader);
+
+    function storeEvidence(bytes32 dataHash) external {
+        require(dataHash != bytes32(0), "Invalid hash: zero hash not allowed");
+        require(registry[dataHash].timestamp == 0, "Evidence hash already exists");
+
+        registry[dataHash] = Evidence({
+            dataHash: dataHash,
+            timestamp: block.timestamp,
+            uploader: msg.sender
+        });
+
+        emit EvidenceStored(dataHash, block.timestamp, msg.sender);
+    }
+
+    function getEvidence(bytes32 dataHash) external view returns (bytes32, uint256, address) {
+        Evidence memory ev = registry[dataHash];
+        require(ev.timestamp != 0, "Evidence hash not found");
+        return (ev.dataHash, ev.timestamp, ev.uploader);
+    }
+
+    function verifyEvidence(bytes32 dataHash) external view returns (bool) {
+        return registry[dataHash].timestamp != 0;
+    }
+}
+```
+
+- **`storeEvidence(bytes32 dataHash)`**: Records the 32-byte digest, stores the block timestamp (`block.timestamp`), and records the sender's account address (`msg.sender`). Reverts on zero hash or duplicate submission.
+- **`getEvidence(bytes32 dataHash)`**: Retrieves the stored audit record (`dataHash`, `timestamp`, `uploader`). Reverts if unanchored.
+- **`verifyEvidence(bytes32 dataHash)`**: Read-only check returning boolean `true`/`false`.
+
+---
+
+### Cryptographic Hash Anchoring vs. Raw Data Storage
+
+Storing full facial images or web search JSON responses directly on an Ethereum blockchain is fundamentally flawed:
+- **Storage Cost:** Storing 1 MB of raw data on Ethereum costs thousands of dollars in gas.
+- **Data Privacy Violations:** Storing biometric images or personally identifiable web records violates GDPR/CCPA privacy rights, as data on public blockchains cannot be deleted.
+
+**The Solution:** The pipeline computes an off-chain deterministic SHA-256 digest of the canonical evidence payload and anchors **only the 32-byte hash (`bytes32`)** on-chain. If even a single character in the evidence payload is modified off-chain, the re-computed SHA-256 digest diverges completely, failing on-chain validation.
+
+---
+
+## 3. How to Run It
+
+### Prerequisites
+
+Ensure the following runtimes are installed on your machine:
+- **Python:** Version `3.10` or higher
+- **Node.js:** Version `18.x` or higher (includes `npm`)
+- **Git**
+
+---
+
+### Installation & Setup
+
+1. **Clone the Repository:**
+   ```bash
+   git clone https://github.com/JinayPatel15/Face-Identification-Blockchain-Verification.git
+   cd Face-Identification-Blockchain-Verification
+   ```
+
+2. **Set Up Python Virtual Environment:**
+   ```bash
+   # On Windows:
+   python -m venv .venv
+   .venv\Scripts\activate
+
+   # On Linux/macOS:
+   python3 -m venv .venv
+   source .venv/bin/activate
+   ```
+
+3. **Install Python Dependencies:**
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+4. **Install Node.js Dependencies & Compile Contracts:**
+   ```bash
+   npm install
+   npx hardhat compile
+   ```
+
+5. **Verify Pre-trained ONNX Models:**
+   Ensure the following model files exist in the `models/` folder:
+   - `models/face_detection_yunet.onnx`
+   - `models/face_recognition_sface.onnx`
+
+---
+
+### Environment Configuration (`.env`)
+
+Copy the template file to create your active `.env`:
 ```bash
-npx hardhat node
+cp .env.example .env
 ```
-This runs a local development blockchain at `http://127.0.0.1:8545` with instantaneous deterministic block mining and pre-funded test accounts.
 
-### 3. Deploying EvidenceRegistry (If Needed)
-In a separate terminal, deploy the smart contract to the local node:
-```bash
-npx hardhat run scripts/deploy.js --network localhost
-```
-Note the deployed address output (typically `0x5FbDB2315678afecb367f032d93F642f64180aa3`).
-
-### 4. Configuring `.env`
-Ensure your local `.env` contains the configuration:
+Ensure `.env` contains the required configuration:
 ```env
-# SerpApi Key for Live Web Searches
+# SerpApi API key for live Google Lens reverse image queries (Optional if using --use-cached-search)
 SERPAPI_API_KEY=your_serpapi_key_here
 
-# Local Hardhat Ethereum RPC Provider
+# Local Hardhat Node JSON-RPC Provider
 BLOCKCHAIN_RPC_URL=http://127.0.0.1:8545
 
-# Deployed Smart Contract Address
+# Deployed EvidenceRegistry Smart Contract Address (Output by deployment script)
 CONTRACT_ADDRESS=0x5FbDB2315678afecb367f032d93F642f64180aa3
 
-# Local Hardhat Test Account Private Key (Account #0 - never use real cryptocurrency)
+# Hardhat Local Test Account #0 Private Key (Pre-funded development account; never use with real funds)
 BLOCKCHAIN_PRIVATE_KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80
 ```
 
-### 5. Running Live Search
-Run the full pipeline with live SerpApi Google Lens reverse-image search:
-```bash
-python app/main.py --input input/sample.jpg
-```
+---
 
-### 6. Running Cached Search
-To conserve external search API quotas and run reproducible local demonstrations, use cached search results:
-```bash
-python app/main.py --input input/sample.jpg --use-cached-search
-```
-The CLI explicitly displays `Mode: CACHED` and `Using cached search results from search_results.json` when running in this mode.
+### Starting the Local Blockchain & Deploying Contract
 
-### 7. Understanding the Output
-The pipeline prints clear step-by-step progress across 6 distinct stages:
-- **[1/6] Face Detection:** Reports image dimensions and number of faces detected.
-- **[2/6] Face Selection:** Details primary face index, confidence score, bounding box coordinates, and SFace feature extraction shape.
-- **[3/6] Reverse-Image Search:** Displays execution mode (LIVE or CACHED), total visual matches found, and top representative web occurrences.
-- **[4/6] Evidence Hashing:** Shows canonical byte size, deterministic SHA-256 digest, and output file locations.
-- **[5/6] Blockchain Anchoring:** Connects to RPC, displays contract address, and registers the evidence hash.
-- **[6/6] Blockchain Verification:** Independently queries the ledger, validates the stored digest and block timestamp, and reports audit verdict.
+1. **Terminal 1 — Start the Hardhat Node:**
+   ```bash
+   npm run node
+   ```
+   *(Keep this terminal running. It hosts the local Ethereum network on `http://127.0.0.1:8545`)*.
 
-### 8. Understanding NEWLY ANCHORED vs ALREADY ANCHORED
-Because `EvidenceRegistry` enforces unique hash registrations, the pipeline handles repeat runs gracefully:
-- **`NEWLY ANCHORED`:** The evidence hash was not yet present on-chain. A new transaction is broadcast, confirmed, and the mined transaction hash and block number are displayed.
-- **`ALREADY ANCHORED`:** The evidence hash was previously recorded on the blockchain ledger. The pipeline avoids redundant transaction broadcasting, retrieves the existing immutable record, verifies it against the newly computed hash, and proceeds to verification.
-
-Both scenarios produce a successful `PASS` verification verdict.
-
-### 9. Meaning and Limitations of Blockchain Verification
-- **Cryptographic Integrity:** Blockchain anchoring guarantees that the exact canonical search evidence existed in that exact state at or before the recorded block timestamp, and has not been altered, manipulated, or fabricated since.
-- **Scope Limitation:** The smart contract stores and verifies only 32-byte SHA-256 cryptographic digests. No images, personal biometrics, or web credentials are ever stored on-chain.
-
-### 10. Identity Disclaimer
-> [!IMPORTANT]
-> **Matching public web content found by Google Lens does NOT prove or confirm the real-world identity of the person.**
-> Visual matches indicate publicly indexed web occurrences (e.g. social profiles, news articles, portfolios) that share visual similarity with the submitted face crop. The pipeline does NOT infer identity from search results, and blockchain verification only verifies the cryptographic integrity and existence of the canonical evidence hash.
+2. **Terminal 2 — Deploy the Smart Contract:**
+   ```bash
+   npm run deploy
+   ```
+   *Expected output:*
+   ```text
+   EvidenceRegistry deployed to: 0x5FbDB2315678afecb367f032d93F642f64180aa3
+   ```
+   *(Ensure the address in `.env` matches this deployed address).*
 
 ---
 
-## Development Roadmap
+### Running via Command-Line Interface (CLI)
 
-- [x] **Stage 1: Initial Foundation & Project Scaffolding**
-  - Set up directory structure, configuration templates, entry points, and documentation.
-- [x] **Stage 2: Face Detection & Feature Extraction**
-  - Integrate YuNet detection model and SFace feature extraction model.
-- [x] **Stage 3: Dynamic Web & Reverse-Image Search Integration**
-  - Implement dynamic search queries against SerpApi Google Lens and extract evidence information.
-- [x] **Stage 4: Evidence Structuring & Cryptographic Hashing (Phase 5)**
-  - Deterministic canonicalization and SHA-256 hashing of normalized search evidence.
-- [x] **Stage 5: Solidity Smart Contract & Local Blockchain Setup (Phase 4A & 4B)**
-  - Implement `EvidenceRegistry.sol`, configure Hardhat, and Python `BlockchainClient` (`web3.py`).
-- [x] **Stage 6: End-to-End Verification Pipeline (Phase 6)**
-  - Integrate face processing, reverse-image search, deterministic hashing, and smart contract anchoring into a unified CLI workflow.
-- [ ] **Stage 7: Final Hardening & Audit Verification**
-  - Final project polish, documentation review, and deployment verification.
+#### 1. Default Verification Run (Cached Search, 90% Threshold)
+Use the included reference image and cached search results to run the pipeline without consuming search API quota:
+```bash
+python app/main.py --input input/sample.jpg --use-cached-search
+```
 
+**Output when candidates are $< 90\%$ (Different Persons):**
+```text
+======================================================================
+FACE IDENTIFICATION & BLOCKCHAIN VERIFICATION
+======================================================================
 
+[1/6] Face Detection
+      Input image:      sample.jpg (768x1024 px)
+      Faces detected:   1
 
+[2/6] Face Selection & Feature Extraction
+      Primary face:     Index 0 (highest confidence)
+      Confidence:       0.9337
+      Bounding box:     [x=348, y=437, w=89, h=103]
+      SFace embedding:  Shape (1, 128) (128-d float32 vector)
+
+[3/6] Reverse-Image Search
+      Mode:             CACHED
+
+[4/6] Candidate Face Matching & Verification
+      Similarity thresh: 90.0%
+      Candidates:        60
+      Accepted matches:  0 (>= 90.0%)
+      Rejected count:    60 (< 90.0% or no face)
+        #1 [REJECTED] Similarity: 51.0% | LinkedIn: Sahil Jana - Ex-SDE Intern
+        #2 [REJECTED] Similarity: 50.1% | GitHub: dhairyashiil (Dhairyashil Shinde)
+        #3 [REJECTED] Similarity: 49.0% | LinkedIn: Ayush Khatavkar - Financial
+
+      ============================================================
+      NO MATCHING WEB CONTENT FOUND
+      0 candidates reached the 90.0% similarity threshold.
+      Blockchain verification not performed because no matching web/social evidence was discovered.
+      ============================================================
+
+======================================================================
+FINAL RESULT: NO MATCH FOUND
+======================================================================
+```
+
+#### 2. Verification Run with Candidate Matching Acceptance
+Run with a threshold of `0.50` to demonstrate the full acceptance, canonical evidence creation, and on-chain anchoring flow:
+```bash
+python app/main.py --input input/sample.jpg --use-cached-search --similarity-threshold 0.50
+```
+
+**Output when candidate is $\ge 50\%$:**
+```text
+[4/6] Candidate Face Matching & Verification
+      Accepted matches:  1 (>= 50.0%)
+      Rejected count:    59 (< 50.0% or no face)
+        #1 [ACCEPTED] Similarity: 51.0% | LinkedIn: Sahil Jana
+
+[5/6] Evidence Hashing
+      Canonical data:   canonical_evidence.json (463 bytes, 1 match)
+      SHA-256 Digest:   0x640f80f00c286445384ba85ac6e5910c19c304c0e102266ffc6c5da7042201e7
+      Hash file saved:  evidence_hash.txt
+
+[5/6] Blockchain Anchoring
+      RPC Node:         http://127.0.0.1:8545
+      Contract Address: 0x5FbDB2315678afecb367f032d93F642f64180aa3
+      Status:           NEWLY ANCHORED
+      Transaction:      78f111faebabe6bc158fd34c212d62f418bcd7544527b24d2a535012e738b46c
+
+[6/6] Blockchain Verification
+      Computed hash:    0x640f80f00c286445384ba85ac6e5910c19c304c0e102266ffc6c5da7042201e7
+      On-chain hash:    0x640f80f00c286445384ba85ac6e5910c19c304c0e102266ffc6c5da7042201e7
+      Block Timestamp:  2026-09-05 18:11:05 UTC (UNIX 1788631865)
+      On-chain verify:  TRUE
+
+======================================================================
+FINAL RESULT: VERIFIED
+======================================================================
+```
+
+#### 3. Live Google Lens Search
+Run with live reverse image search using your SerpApi key:
+```bash
+python app/main.py --input path/to/your/photo.jpg
+```
+
+#### CLI Options Reference
+
+| Argument | Short | Default | Description |
+| :--- | :---: | :---: | :--- |
+| `--input` | `-i` | `input/sample.jpg` | Path to input image file containing a face |
+| `--output-dir` | `-o` | `output` | Directory where output crops, JSON, and hashes are stored |
+| `--use-cached-search` | | `False` | Use local cached search results instead of live SerpApi call |
+| `--similarity-threshold`| | `0.90` | Cosine similarity threshold for SFace match acceptance |
+| `--max-results` | `-n` | `5` | Maximum representative candidates to display |
+| `--score-threshold` | | `0.60` | Minimum confidence threshold for YuNet face detection |
+
+---
+
+### Running via Interactive Web Dashboard (Streamlit)
+
+Launch the interactive web application in your browser:
+```bash
+streamlit run frontend/app.py
+```
+Open **`http://localhost:8501`** in your browser.
+
+#### Dashboard Features
+- **Sidebar Image Upload:** Upload any `.jpg`, `.png`, or `.webp` portrait or select the preloaded sample.
+- **Interactive Threshold Slider:** Dynamically adjust the SFace Match Threshold from 50% to 100% (defaults to 90%).
+- **Interactive Horizontal Flow Diagram:** Visual progress tracking indicating stage completion or early skip branches.
+- **5 Detailed Audit Tabs:**
+  1. **📊 Overview:** Displays verdict banner (`VERIFIED`, `NO MATCH FOUND`, or `TAMPERED / VERIFICATION FAILED`) and key metrics.
+  2. **👤 Face Detection:** Visualizes bounding box, 5 landmarks, cropped portrait, and SFace feature vector properties.
+  3. **🌐 Web Matches:** Shows accepted matches with green similarity badges and an expandable list of rejected candidates showing similarity percentages.
+  4. **🔒 Evidence & SHA-256:** Shows canonical JSON evidence, byte payload size, and the 64-character SHA-256 digest.
+  5. **⛓️ Blockchain Ledger:** Displays on-chain coordinates, uploader address, transaction hash, block timestamp, and verification status.
+
+---
+
+### Running the Automated Test Suites
+
+#### 1. Python Unit & Orchestration Tests (76 Tests)
+Run the complete Python test suite covering face processing, candidate matching, threshold segregation, search normalization, canonical hashing, and pipeline orchestration:
+```bash
+python -m unittest discover -s tests -p "test_*.py"
+```
+*Result:* `Ran 76 tests in 1.030s — OK`
+
+#### 2. Solidity Smart Contract Tests (8 Tests)
+Run the Hardhat contract test suite verifying contract deployment, hash storage, zero-hash rejection, duplicate prevention, and verification queries:
+```bash
+npx hardhat test
+```
+*Result:* `8 passing (644ms)`
+
+---
+
+## 4. Known Limitations
+
+### 1. Public Web Indexing Constraints
+- The pipeline queries Google Lens via SerpApi. If a person's photograph has **never been uploaded to a publicly indexed web page** (e.g., social media profiles, public directories, blogs, news articles), reverse image search returns zero matching results.
+- Unindexed private records, password-protected sites, or intranet systems cannot be queried.
+
+### 2. Reverse Search API Quotas & Rate Limits
+- Live reverse image search relies on external APIs (SerpApi). Free-tier API keys provide a limited quota (e.g., 100 searches/month).
+- *Mitigation:* The project implements a cached search mode (`--use-cached-search`) that loads previously cached search results from `output/search_results.json`, allowing complete local testing and demonstration without consuming API credits.
+
+### 3. Face Similarity vs. Legal Real-World Identity
+- SFace cosine similarity measures visual facial geometry likeness between a query crop and a web thumbnail.
+- While a score $\ge 90\%$ confirms that the face in the web content is visually identical to the target, **it does not legally or medically confirm the real-world legal identity** of the person (e.g., does not replace passport validation, KYC document checks, or biometric liveness detection).
+
+### 4. Local Blockchain Sandboxed State
+- The default setup runs on a local Hardhat node in memory. If the `npm run node` process is stopped or restarted, the on-chain ledger resets unless state persistence is explicitly enabled.
+- *Mitigation:* The Python client detects if a node was restarted and alerts the user to re-run `npm run deploy`. For permanent testnet deployment, the same contract can be pointed to Ethereum Sepolia or an EVM-compatible L2.
+
+### 5. Image Quality, Lighting & Extreme Head Poses
+- Low-resolution crops ($< 300\times 300$ pixels) or heavily compressed web thumbnails can reduce the confidence of YuNet detection and SFace feature extraction.
+- Extreme head pose angles (yaw or pitch $> 45^\circ$) or partial facial occlusion (heavy sunglasses, masks) can reduce similarity scores below the 90% threshold.
+
+### 6. Single Primary Face Selection
+- If an uploaded photo contains multiple people (e.g., group photo), the pipeline automatically selects the **single primary face** with the highest detection confidence score. Multi-subject batch identification from a single group photograph is not currently supported.
+
+---
+
+## 5. Security & Privacy Guarantees
+
+- **No Biometric Storage On-Chain:** Biometric feature vectors (128-dimensional floating point embeddings) and facial portrait images are **never submitted to the blockchain**. Only deterministic 32-byte cryptographic hashes of web evidence are recorded on-chain.
+- **Zero Credential Leaking:** The canonical evidence payload strips all local filesystem paths, API keys, private keys, and runtime machine timestamps.
+- **Deterministic Serialization:** JSON serialization enforces lexicographical sorting and compact formatting (`separators=(',', ':')`), ensuring the exact same SHA-256 digest is produced on Windows, Linux, and macOS.
+- **Isolated Development Keys:** Hardhat's default test account private key is strictly restricted to local development (`Chain ID 31337`).
+
+---
+
+## 6. License
+
+This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
